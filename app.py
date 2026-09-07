@@ -12,6 +12,8 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
+from pdf_invoice import build_invoice_pdf
+
 app = Flask(__name__)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -348,8 +350,13 @@ def webhook():
             )
 
         xml_bytes = build_xml(parsed, constants, buyer_info, goods)
-        filename = f"invoice-{parsed['date']}.xml"
-        tg_send_document(chat_id, filename, xml_bytes)
+        xml_filename = f"invoice-{parsed['date']}.xml"
+        tg_send_document(chat_id, xml_filename, xml_bytes)
+
+        pdf_buf = io.BytesIO()
+        build_invoice_pdf(parsed, constants, buyer_info, goods, pdf_buf)
+        pdf_filename = f"invoice-{parsed['date']}.pdf"
+        tg_send_document(chat_id, pdf_filename, pdf_buf.getvalue())
     except Exception as e:
         tg_send_message(chat_id, f"Սխալ. {e}")
 
