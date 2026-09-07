@@ -156,20 +156,44 @@ def read_constants(ws):
     return d
 
 
+# Telegram messages use the short, everyday company name (e.g. "ՊՐԵՄԻՈՒՄ ՊՐԻՆՏ
+# ՍՊԸ"), while the reference file carries the full legal name as registered
+# ("«ՊՐԵՄԻՈՒՄ ՊՐԻՆՏ» Սահմանափակ պատասխանատվությամբ ընկերություն (ՍՊԸ)"). Strip
+# the quoting and the legal-form boilerplate from both sides before comparing,
+# so the two forms of the same name match.
+_LEGAL_FORMS = [
+    "Սահմանափակ պատասխանատվությամբ ընկերություն",
+    "Փակ բաժնետիրական ընկերություն",
+    "Բաց բաժնետիրական ընկերություն",
+    "Հասարակական կազմակերպություն",
+    "Անհատ ձեռնարկատեր",
+]
+
+
+def normalize_name(name):
+    n = str(name).strip()
+    n = n.replace("«", "").replace("»", "")
+    for lf in _LEGAL_FORMS:
+        n = n.replace(lf, "")
+    n = n.replace("(", "").replace(")", "")
+    n = re.sub(r"\s+", " ", n).strip()
+    return n.upper()
+
+
 def lookup_product(ws, name):
-    name_norm = name.strip()
+    name_norm = normalize_name(name)
     for row in ws.iter_rows(min_row=2, values_only=True):
         pname, unit, code = (row + (None, None, None))[:3]
-        if pname and str(pname).strip() == name_norm:
+        if pname and normalize_name(pname) == name_norm:
             return {"unit": unit, "code": code}
     return None
 
 
 def lookup_counterparty(ws, name):
-    name_norm = name.strip()
+    name_norm = normalize_name(name)
     for row in ws.iter_rows(min_row=2, values_only=True):
         cname, _tin_raw, tin_padded, address = (row + (None, None, None, None))[:4]
-        if cname and str(cname).strip() == name_norm:
+        if cname and normalize_name(cname) == name_norm:
             return {"tin": tin_padded, "name": cname, "address": address}
     return None
 
