@@ -178,6 +178,12 @@ def normalize_name(name):
     for lf in _LEGAL_FORMS:
         n = n.replace(lf, "")
     n = n.replace("(", "").replace(")", "")
+    # Strip a standalone "ԱՁ" token wherever it appears. On the Telegram side
+    # it's a prefix ("ԱՁ ԱՆՈՒՆ"), while on the reference-file side it's a
+    # leftover suffix token left after the "Անհատ ձեռնարկատեր" phrase above
+    # is removed ("ԱՆՈՒՆ ... (ԱՁ)" -> "ԱՆՈՒՆ ... ԱՁ"). Removing it from both
+    # sides (rather than trying to reposition it) makes them match.
+    n = re.sub(r"\bԱՁ\b", "", n, flags=re.UNICODE)
     n = re.sub(r"\s+", " ", n).strip()
     return n.upper()
 
