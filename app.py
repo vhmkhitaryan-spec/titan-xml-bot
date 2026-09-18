@@ -384,6 +384,33 @@ def webhook():
     return jsonify(ok=True)
 
 
+# ---------------------------------------------------------------------------
+# TEMP: token test (does a token obtained in Armenia work from Render?)
+# ---------------------------------------------------------------------------
+
+@app.route("/tokentest", methods=["POST"])
+def tokentest():
+    secret = os.environ.get("TOKEN_SECRET", "")
+    if not secret or request.headers.get("X-Secret") != secret:
+        return jsonify(ok=False, error="forbidden"), 403
+    data = request.get_json(force=True, silent=True) or {}
+    token = str(data.get("token", ""))
+    tin = str(data.get("tin", ""))
+    if not token or not tin.isdigit():
+        return jsonify(ok=False, error="token and numeric tin required"), 400
+    try:
+        r = requests.post(
+            "https://e-invoicing.taxservice.am/api/invoice/invoice-count",
+            json={"payload": {"condition": f"(#supplierTin = '{tin}')"}},
+            headers={"accept": "application/json"},
+            cookies={"jwt-auth-token": token},
+            timeout=20,
+        )
+        return jsonify(ok=True, status=r.status_code, body=r.text[:500])
+    except Exception as e:
+        return jsonify(ok=False, error=f"{type(e).__name__}: {e}")
+
+
 @app.route("/", methods=["GET"])
 def health():
     return "ok"
