@@ -177,10 +177,19 @@ def build_invoice_pdf(parsed, constants, buyer_info, goods, out_path):
             return f"{v:,.5f}".rstrip("0").rstrip(".")
         return str(v)
 
+    def fmt_code(v):
+        # Classifier code, e.g. 4810 — no thousands separator, and Excel
+        # hands it back as a float (4810.0) so strip the trailing .0.
+        if v is None:
+            return ""
+        if isinstance(v, float) and v == int(v):
+            return str(int(v))
+        return str(v)
+
     data = [headers]
     for i, g in enumerate(goods, start=1):
         data.append([
-            Paragraph(str(i), cell_style), Paragraph(str(g["code"]), cell_style),
+            Paragraph(str(i), cell_style), Paragraph(fmt_code(g["code"]), cell_style),
             Paragraph(g["name"], name_style), Paragraph(g["unit"], cell_style),
             Paragraph(fmt(g["qty"]), cell_style), Paragraph(fmt(g["net_unit"]), cell_style),
             Paragraph("", cell_style), Paragraph(fmt(g["price"]), cell_style),
