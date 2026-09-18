@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="hy">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ՊԵԿ կապի թեստ</title>
+<style>
+  body{font:18px/1.5 system-ui,-apple-system,"Segoe UI",Arial,sans-serif;margin:24px;max-width:640px}
+  button{font:inherit;padding:12px 22px;border-radius:10px;border:0;background:#1d4ed8;color:#fff}
+  #out{margin-top:20px;white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;font-size:15px}
+</style>
+</head>
+<body>
+<h2>ՊԵԿ կապի թեստ</h2>
+<p>Սեղմիր կոճակը և սպասիր մինչև 30 վայրկյան։ Login կամ password պետք չէ։</p>
+<button id="go">Ստուգել</button>
+<div id="out"></div>
+<script>
+const URLS = [
+  "https://ews.taxservice.am/taxsystem-fe-ws/taxpayer/loginService",
+  "http://ews.taxservice.am/taxsystem-fe-ws/taxpayer/loginService"
+];
+const out = document.getElementById("out");
+const log = s => out.textContent += s + "\n";
+async function test(u){
+  log("— " + u.split(":")[0].toUpperCase());
+  for (const ct of ["text/plain", "text/xml;charset=UTF-8"]) {
+    const t = Date.now();
+    try {
+      const r = await fetch(u, { method: "POST", headers: { "Content-Type": ct }, body: "<x/>" });
+      const txt = await r.text();
+      log("✅ " + ct.split(";")[0] + ": ԿԱՐԴԱՑՎԵՑ (HTTP " + r.status + ", " + (Date.now()-t) + " ms)\n   " + txt.slice(0, 100));
+    } catch (e) {
+      log("❌ " + ct.split(";")[0] + ": չկարդացվեց (" + (Date.now()-t) + " ms)");
+    }
+  }
+  const t = Date.now();
+  try { await fetch(u, { method: "POST", mode: "no-cors", body: "<x/>" }); log("ℹ️ սերվերին հասավ (" + (Date.now()-t) + " ms)"); }
+  catch (e) { log("ℹ️ սերվերին չհասավ (" + (Date.now()-t) + " ms)"); }
+  log("");
+}
+document.getElementById("go").onclick = async () => {
+  out.textContent = "Էջ՝ " + location.protocol + "\n\n";
+  for (const u of URLS) await test(u);
+  log("Վերջ։ Screenshot արա և ուղարկիր։");
+};
+</script>
+</body>
+</html>
