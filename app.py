@@ -317,6 +317,21 @@ def webhook():
     chat_id = message["chat"]["id"]
     text = message.get("text", "")
 
+    if text.strip() == "/nettest":
+        lines = []
+        for name, url in [
+            ("ews login", "http://ews.taxservice.am/taxsystem-fe-ws/taxpayer/loginService"),
+            ("ews https", "https://ews.taxservice.am/taxsystem-fe-ws/taxpayer/loginService"),
+            ("e-invoicing", "https://e-invoicing.taxservice.am/api/invoice/invoice-count"),
+        ]:
+            try:
+                r = requests.post(url, data=b"", timeout=10)
+                lines.append(f"\u2705 {name}: HTTP {r.status_code}")
+            except Exception as e:
+                lines.append(f"\u274c {name}: {type(e).__name__}")
+        tg_send_message(chat_id, "\n".join(lines))
+        return jsonify(ok=True)
+
     # Only ever act on genuinely FORWARDED messages (see design notes: a Reply
     # does not expose a bot-authored message's content cross-bot, a Forward does).
     if "forward_origin" not in message and "forward_from" not in message and "forward_date" not in message:
