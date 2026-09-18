@@ -16,6 +16,56 @@ from pdf_invoice import build_invoice_pdf
 
 app = Flask(__name__)
 
+# ---------------------------------------------------------------------------
+# ՊԵԿ token store (token arrives from the iPhone Shortcut every 30 min)
+# ---------------------------------------------------------------------------
+import base64
+import datetime
+import threading
+import time
+
+TOKEN_STATE = {"token": None, "received": 0.0, "exp": 0.0}
+TOKEN_LOCK = threading.Lock()
+YEREVAN = datetime.timezone(datetime.timedelta(hours=4))
+
+
+def _jwt_exp(token):
+    try:
+        part = token.split(".")[1]
+        part += "=" * (-len(part) % 4)
+        return float(json.loads(base64.urlsafe_b64decode(part)).get("exp", 0))
+    except Exception:
+        return 0.0
+
+
+def current_token():
+    """Returns a token that is still valid for at least 2 minutes, else None."""
+    with TOKEN_LOCK:
+        t, exp = TOKEN_STATE["token"], TOKEN_STATE["exp"]
+    if t and (exp == 0 or exp - time.time() > 120):
+        return t
+    return None
+
+
+def _fmt_time(ts):
+    return datetime.datetime.fromtimestamp(ts, YEREVAN).strftime("%H:%M")
+
+
+def _keepalive():
+    # Render free tier sleeps after ~15 min without traffic and forgets the token.
+    # While we hold a valid token, ping ourselves every 10 min to stay awake.
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    while True:
+        time.sleep(600)
+        if url and current_token():
+            try:
+                requests.get(url + "/", timeout=20)
+            except Exception:
+                pass
+
+
+threading.Thread(target=_keepalive, daemon=True).start()
+
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DRIVE_FILE_ID = os.environ["DRIVE_FILE_ID"]
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -332,6 +382,32 @@ def webhook():
         tg_send_message(chat_id, "\n".join(lines))
         return jsonify(ok=True)
 
+    if text.strip() == "/tokenstatus":
+        tok = current_token()
+        with TOKEN_LOCK:
+            rec, exp = TOKEN_STATE["received"], TOKEN_STATE["exp"]
+        if not rec:
+            tg_send_message(chat_id, "\u274c Token դեռ չի ստացվել։")
+        elif not tok:
+            tg_send_message(chat_id, f"\u274c Token-ը ժամկետանց է. վերջինը ստացվել է {_fmt_time(rec)}-ին։")
+        else:
+            try:
+                r = requests.post(
+                    "https://e-invoicing.taxservice.am/api/invoice/invoice-count",
+                    json={"payload": {"condition": "(#status = 'ISSUED')"}},
+                    headers={"accept": "application/json"},
+                    cookies={"jwt-auth-token": tok},
+                    timeout=20,
+                )
+                code = (r.json().get("failure") or {}).get("code", "ok")
+            except Exception as e:
+                code = type(e).__name__
+            tg_send_message(
+                chat_id,
+                f"\u2705 Token-ը կա\nՍտացվել է՝ {_fmt_time(rec)}\nՎավեր է մինչև՝ {_fmt_time(exp) if exp else '?'}\nՊԵԿ-ի պատասխան՝ {code}",
+            )
+        return jsonify(ok=True)
+
     # Only ever act on genuinely FORWARDED messages (see design notes: a Reply
     # does not expose a bot-authored message's content cross-bot, a Forward does).
     if "forward_origin" not in message and "forward_from" not in message and "forward_date" not in message:
@@ -409,6 +485,27 @@ def tokentest():
         return jsonify(ok=True, status=r.status_code, body=r.text[:500])
     except Exception as e:
         return jsonify(ok=False, error=f"{type(e).__name__}: {e}")
+
+
+@app.route("/token", methods=["POST"])
+def receive_token():
+    """The iPhone Shortcut posts the raw ՊԵԿ login response here."""
+    secret = os.environ.get("TOKEN_SECRET", "")
+    if not secret or request.headers.get("X-Secret") != secret:
+        return "forbidden", 403
+    raw = request.get_data(as_text=True) or ""
+    m = re.search(r"<(?:\w+:)?AuthToken>\s*(.*?)\s*</(?:\w+:)?AuthToken>", raw, re.S)
+    if m:
+        token = m.group(1)
+    elif raw.strip().count(".") == 2 and "<" not in raw:
+        token = raw.strip()
+    else:
+        s = re.search(r'Message="([^"]*)"', raw)
+        return "ՊԵԿ login-ը չհաջողվեց" + (f"՝ {s.group(1)}" if s else ""), 400
+    exp = _jwt_exp(token)
+    with TOKEN_LOCK:
+        TOKEN_STATE.update(token=token, received=time.time(), exp=exp)
+    return f"OK, token-ը վավեր է մինչև {_fmt_time(exp) if exp else '?'}"
 
 
 @app.route("/", methods=["GET"])
