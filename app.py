@@ -72,6 +72,7 @@ MAIL_REPEAT_AFTER = 60 * 60    # at most one e-mail per hour while waiting
 BLOCK_AFTER_0032 = 60 * 60     # ՊԵԿ says a token is still valid: wait up to 1 h
 
 INVOICE_HEADER = "Հաշիվ-ապրանքագիր"
+CANCEL_HEADER = "\u274c Չեղարկում"   # "❌ Չեղարկում": same body as the invoice it cancels
 TG_DIVIDER_CHAR = "⠀"
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
@@ -461,10 +462,23 @@ class Progress:
 
     CAPTION_LIMIT = 1000  # Telegram allows 1024 UTF-16 units; emoji count double
 
-    def __init__(self, chat_id, title, reply_to=None):
+    def __init__(self, chat_id, title, reply_to=None, with_file=True):
         self.chat_id, self.lines, self.message_id = chat_id, [title], None
-        self.reply_to = reply_to
-        self._send_placeholder()
+        self.reply_to, self.with_file = reply_to, with_file
+        if with_file:
+            self._send_placeholder()
+        else:
+            self._send_text()
+
+    def _send_text(self):
+        body = {"chat_id": self.chat_id, "text": self._caption()}
+        if self.reply_to:
+            body["reply_parameters"] = {"message_id": self.reply_to, "allow_sending_without_reply": True}
+        try:
+            r = requests.post(f"{TELEGRAM_API}/sendMessage", json=body, timeout=20).json()
+            self.message_id = (r.get("result") or {}).get("message_id")
+        except Exception:
+            pass
 
     def _caption(self):
         head, steps = self.lines[:1], self.lines[1:]
@@ -494,10 +508,16 @@ class Progress:
         if self.message_id is None:
             return
         try:
-            requests.post(f"{TELEGRAM_API}/editMessageCaption",
-                          json={"chat_id": self.chat_id, "message_id": self.message_id,
-                                "caption": self._caption()},
-                          timeout=20)
+            if self.with_file:
+                requests.post(f"{TELEGRAM_API}/editMessageCaption",
+                              json={"chat_id": self.chat_id, "message_id": self.message_id,
+                                    "caption": self._caption()},
+                              timeout=20)
+            else:
+                requests.post(f"{TELEGRAM_API}/editMessageText",
+                              json={"chat_id": self.chat_id, "message_id": self.message_id,
+                                    "text": self._caption()},
+                              timeout=20)
         except Exception:
             pass
 
@@ -526,6 +546,8 @@ class Progress:
 
     def finish_without_pdf(self):
         """Same message: placeholder file -> the log itself, so no 'processing' file is left."""
+        if not self.with_file:
+            return
         self._replace_file("log.txt", "\n".join(self.lines).encode("utf-8"), "text/plain")
 
 
@@ -782,6 +804,74 @@ def pek_draft_pdf(token, doc_id):
                        f"{len(r.content)} բ {detail}".strip())
 
 
+def _day_bounds(date_str):
+    d = datetime.date.fromisoformat(date_str)
+    return (d - datetime.timedelta(days=1)).isoformat(), (d + datetime.timedelta(days=1)).isoformat()
+
+
+def _same_day(value, date_str):
+    """ՊԵԿ may return deliveredAt in UTC or local time; accept either."""
+    if not value:
+        return False
+    v = str(value)
+    if v[:10] == date_str:
+        return True
+    try:
+        t = datetime.datetime.fromisoformat(v.replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=datetime.timezone.utc)
+        return t.astimezone(YEREVAN).date().isoformat() == date_str
+    except ValueError:
+        return False
+
+
+def _close(a, b, eps=0.011):
+    try:
+        return abs(float(a) - float(b)) <= eps
+    except (TypeError, ValueError):
+        return False
+
+
+def find_matching_drafts(token, prepared):
+    """Every field of the cancellation must match the draft: date, buyer,
+    driver, totals, and each line (name, quantity, amounts, same order)."""
+    p, buyer, goods, consts = prepared["parsed"], prepared["buyer"], prepared["goods"], prepared["constants"]
+    tin = str(consts.get("SupplierTIN") or "")
+    lo, hi = _day_bounds(p["date"])
+    condition = (
+        f"((((#supplierTin = '{tin}') and (#buyerTin = '{buyer['tin']}')) and "
+        f"((#status = 'DRAFT') and (#type = 'GOODS'))) and "
+        f"((#deliveredAt >= date('{lo} 00:00:00')) and (#deliveredAt <= date('{hi} 23:59:59'))))"
+    )
+    rows = pek_call(token, "invoice/invoice-list", {
+        "condition": condition, "pageLimit": 50, "pageOffset": 1,
+        "sortCol": "createdAt", "sortAsc": True,
+    }) or []
+    want_total = sum(g["total_price"] for g in goods)
+    matches = []
+    for row in rows:
+        if str(row.get("status")) != "DRAFT" or not _same_day(row.get("deliveredAt"), p["date"]):
+            continue
+        if not _close(row.get("total"), want_total):
+            continue
+        doc = pek_call(token, "goods/goods-by-id", {"id": row["id"]}) or {}
+        if (doc.get("deliveryMethod") or "").strip() != p["driver"].strip():
+            continue
+        items = pek_call(token, "goods/goods-product-by-invoice-id", {"invoiceId": row["id"]}) or []
+        items = sorted(items, key=lambda x: x.get("seqNo") or 0)
+        if len(items) != len(goods):
+            continue
+        if all(
+            (it.get("name") or "").strip() == g["name"].strip()
+            and _close(it.get("quantity"), g["qty"], 1e-6)
+            and _close(it.get("totalValue"), g["price"])
+            and _close(it.get("total"), g["total_price"])
+            for it, g in zip(items, goods)
+        ):
+            matches.append(row["id"])
+    return matches
+
+
 # ---------------------------------------------------------------------------
 # 9. Telegram helpers
 # ---------------------------------------------------------------------------
@@ -863,6 +953,12 @@ def prepare(text, log=_NoProgress()):
 # 11. Worker: reads Telegram updates in order, confirms each only when done
 # ---------------------------------------------------------------------------
 WORKER = {"offset": None, "waiting_chat": None, "queue_len": 0, "handled_cmds": set()}
+
+
+def _is_cancel(msg):
+    """'❌ Չեղարկում' header (emoji variation selector tolerated)."""
+    first = (msg.get("text") or "").split("\n")[0].strip().replace("\ufe0f", "")
+    return first == CANCEL_HEADER
 
 
 def _is_invoice(msg):
@@ -998,6 +1094,31 @@ def process_invoice(msg, prepared, pending_after, log=_NoProgress()):
         return chat_id, doc_id
 
 
+def process_cancel(msg, prepared, pending_after, log=_NoProgress()):
+    chat_id = msg["chat"]["id"]
+    while True:
+        token = usable_token()
+        if not token:
+            wait_for_token(chat_id, pending_after + 1, log)
+            continue
+        try:
+            matches = find_matching_drafts(token, prepared)
+            if not matches:
+                return None
+            log.step("\u2714 ՊԵԿ-ում գտնվեց համապատասխան սևագիր" + (f" ({len(matches)})" if len(matches) > 1 else ""))
+            pek_call(token, "goods/goods-remove-draft", {"id": matches[0]})
+            return matches[0]
+        except PekTransient as e:
+            log.step(f"\u26a0 ՊԵԿ-ը չպատասխանեց ({e}), կփորձեմ 1 րոպեից")
+            time.sleep(60)
+        except PekError as e:
+            if e.auth:
+                log.step("\u26a0 ՊԵԿ-ը token-ը չընդունեց, նորն եմ խնդրում")
+                drop_token()
+                continue
+            raise Skip(f"ՊԵԿ-ը չեղարկումը չընդունեց՝ {e.code}: {e.message}")
+
+
 def worker_loop():
     # Switch Telegram from webhook to getUpdates. Pending updates are kept.
     try:
@@ -1031,11 +1152,43 @@ def worker_loop():
                 _confirm(uid)
                 continue
 
-            if not _is_invoice(msg):
+            if not (_is_invoice(msg) or _is_cancel(msg)):
                 _confirm(uid)
                 continue
 
             chat_id = msg["chat"]["id"]
+            if _is_cancel(msg):
+                log = Progress(chat_id, "\U0001f4e5 Չեղարկումը ստացվեց, մշակում եմ",
+                               reply_to=msg.get("message_id"), with_file=False)
+                try:
+                    body = INVOICE_HEADER + text[text.index("\n"):] if "\n" in text else text
+                    prepared = prepare(body, log)
+                    if not prepared:
+                        _confirm(uid)
+                        continue
+                    pending_after = sum(
+                        1 for x in updates[idx + 1:]
+                        if _is_invoice(x.get("message") or x.get("channel_post") or {})
+                        or _is_cancel(x.get("message") or x.get("channel_post") or {})
+                    )
+                    removed = process_cancel(msg, prepared, pending_after, log)
+                except (Skip, ValueError) as e:
+                    log.step(f"\u274c {e}")
+                    log.step("Սևագիրը չի ջնջվել")
+                    _confirm(uid)
+                    continue
+                except Exception as e:
+                    log.step(f"\u26a0 Ժամանակավոր սխալ՝ {type(e).__name__}: {e}. Կփորձեմ 1 րոպեից")
+                    time.sleep(60)
+                    break
+                if removed:
+                    log.step("\u2714 Սևագիրը ջնջվեց ՊԵԿ-ից")
+                else:
+                    log.step("\u26a0\ufe0f Համապատասխան սևագիր չգտնվեց։ Եթե հաշիվն արդեն ստորագրված է, "
+                             "չեղարկիր այն ՊԵԿ-ի կայքում ձեռքով։")
+                _confirm(uid)
+                continue
+
             log = Progress(chat_id, "\U0001f4e5 Հաշիվը ստացվեց, մշակում եմ", reply_to=msg.get("message_id"))
             try:
                 prepared = prepare(text, log)
