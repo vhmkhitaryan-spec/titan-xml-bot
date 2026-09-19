@@ -708,17 +708,25 @@ def pek_create_draft(token, parsed, constants, buyer_info, goods, doc_id, retry=
 
 def pek_draft_pdf(token, doc_id):
     res = pek_call(token, "goods/goods-pdf-generate", {"id": doc_id}) or {}
-    url = res.get("url") if isinstance(res, dict) else None
+    url = res.get("url") if isinstance(res, dict) else (res if isinstance(res, str) else None)
     if not url:
-        raise PekTransient("PDF-ի հղում չստացվեց")
-    if url.startswith("/"):
-        url = "https://e-invoicing.taxservice.am" + url
-    r = requests.get(url, cookies={"jwt-auth-token": token}, timeout=60)
-    if r.status_code != 200 or not r.content.startswith(b"%PDF"):
-        head = r.content[:150].decode("utf-8", "replace").replace("\n", " ")
-        raise PekTransient(f"PDF-ի փոխարեն եկավ HTTP {r.status_code}, "
-                           f"{r.headers.get('content-type', '?')}, {len(r.content)} բայթ՝ {head}")
-    return r.content
+        raise PekTransient(f"PDF-ի հղում չստացվեց՝ {str(res)[:200]}")
+    root = "https://e-invoicing.taxservice.am"
+    if url.startswith("http"):
+        candidates = [url]
+    else:
+        path = url if url.startswith("/") else "/" + url
+        # The bare path is the web app's route (returns its HTML page); the
+        # file itself is served under /api. Try both, keep the one that is a PDF.
+        candidates = [root + "/api" + path, root + path] if not path.startswith("/api/") else [root + path]
+    tried = []
+    for u in candidates:
+        r = requests.get(u, cookies={"jwt-auth-token": token},
+                         headers={"accept": "application/pdf,*/*"}, timeout=60)
+        if r.status_code == 200 and r.content.startswith(b"%PDF"):
+            return r.content
+        tried.append(f"{u} → HTTP {r.status_code}, {r.headers.get('content-type', '?')}, {len(r.content)} բ")
+    raise PekTransient("PDF չստացվեց. ՊԵԿ-ի հղումը՝ " + url + "; փորձեր՝ " + "; ".join(tried))
 
 
 # ---------------------------------------------------------------------------
