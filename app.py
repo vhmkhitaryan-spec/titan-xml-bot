@@ -945,20 +945,29 @@ def _keepalive():
                 pass
 
 
-_started = False
+# The background threads must live in the SAME process that serves HTTP,
+# otherwise /token updates a STATE the worker never sees (gunicorn may import
+# the app in its master process and then fork the serving worker). So they are
+# started lazily, per process id, on the first request that process handles
+# (Render's health check hits "/" within seconds of boot).
+_started_pid = None
+_start_lock = threading.Lock()
 
 
 def start_background():
-    global _started
-    if _started:
-        return
-    _started = True
+    global _started_pid
+    with _start_lock:
+        if _started_pid == os.getpid():
+            return
+        _started_pid = os.getpid()
     threading.Thread(target=worker_loop, daemon=True, name="worker").start()
     threading.Thread(target=_keepalive, daemon=True, name="keepalive").start()
 
 
-if os.environ.get("TITAN_NO_WORKER") != "1":
-    start_background()
+@app.before_request
+def _ensure_background():
+    if os.environ.get("TITAN_NO_WORKER") != "1" and _started_pid != os.getpid():
+        start_background()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
