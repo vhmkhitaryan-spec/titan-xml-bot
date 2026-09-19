@@ -512,21 +512,54 @@ _CLASSIFIERS = {}
 
 
 def _code_key(v):
-    """Excel numbers come back as floats (4810.0); ՊԵԿ codes are '4810'."""
+    """Excel numbers come back as floats (4810.0); ՊԵԿ codes may contain
+    spaces or dots. Normalise to bare characters: '4810'."""
     if isinstance(v, float) and v.is_integer():
         v = int(v)
-    return str(v).strip()
+    return re.sub(r"[\s.\-]", "", str(v))
+
+
+_CLASSIFIER_LISTS = ("dictionaries/classifier-list",
+                     "dictionaries/classifier-full-list",
+                     "dictionaries/item-classifier-list")
+_CLASSIFIER_SIZES = {}
+
+
+def _load_classifiers(token):
+    for i, path in enumerate(_CLASSIFIER_LISTS):
+        try:
+            data = pek_call(token, path, {}) or []
+        except PekTransient:
+            if i == 0:
+                raise          # main list unavailable: retry the invoice later
+            continue
+        except PekError:
+            continue
+        if isinstance(data, dict):
+            data = next((v for v in data.values() if isinstance(v, list)), [])
+        _CLASSIFIER_SIZES[path.split("/")[-1]] = len(data)
+        for c in data:
+            if isinstance(c, dict) and c.get("code") and c.get("id"):
+                _CLASSIFIERS.setdefault(_code_key(c["code"]), c["id"])
 
 
 def classifier_id(token, code):
     if not _CLASSIFIERS:
-        data = pek_call(token, "dictionaries/classifier-list", {}) or []
-        if isinstance(data, dict):
-            data = next((v for v in data.values() if isinstance(v, list)), [])
-        for c in data:
-            if isinstance(c, dict) and c.get("code"):
-                _CLASSIFIERS[_code_key(c["code"])] = c.get("id")
-    return _CLASSIFIERS.get(_code_key(code))
+        _load_classifiers(token)
+    key = _code_key(code)
+    if key in _CLASSIFIERS:
+        return _CLASSIFIERS[key]
+    # e.g. the dictionary keeps a longer code that starts with ours
+    longer = sorted(k for k in _CLASSIFIERS if k.startswith(key))
+    return _CLASSIFIERS[longer[0]] if longer else None
+
+
+def classifier_hint(code):
+    """What the dictionaries hold near a missing code (for the Telegram log)."""
+    key = _code_key(code)
+    near = sorted(k for k in _CLASSIFIERS if k[:2] == key[:2])[:8]
+    sizes = ", ".join(f"{k}={v}" for k, v in _CLASSIFIER_SIZES.items()) or "ցուցակ չստացվեց"
+    return f"ՊԵԿ ցուցակներ՝ {sizes}; մոտ կոդեր՝ {', '.join(near) or 'չկան'}"
 
 
 def _money(v):
@@ -578,7 +611,9 @@ def build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id):
             "total": _money(g["total_price"]),
         })
     if missing:
-        raise PekError("classifier", "ՊԵԿ-ի դասակարգչում չգտնվեցին կոդերը՝ " + ", ".join(sorted(set(missing))))
+        miss = sorted(set(missing))
+        raise PekError("classifier", "ՊԵԿ-ի դասակարգչում չգտնվեցին կոդերը՝ " + ", ".join(miss)
+                       + ". " + classifier_hint(miss[0]))
 
     total_value = _money(sum(g["price"] for g in goods))
     total_vat = _money(sum(g["vat"] for g in goods))
