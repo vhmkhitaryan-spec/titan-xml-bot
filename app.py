@@ -68,7 +68,6 @@ YEREVAN = datetime.timezone(datetime.timedelta(hours=4))
 
 TOKEN_USE_MARGIN = 60          # use a token only if it has > 60 s left
 TOKEN_EXPIRY_GRACE = 15        # ask for a new one only 15 s after exp has passed
-NOTIFY_AFTER = 5 * 60          # "iPhone is silent" message after 5 min
 MAIL_REPEAT_AFTER = 60 * 60    # at most one e-mail per hour while waiting
 BLOCK_AFTER_0032 = 60 * 60     # ՊԵԿ says a token is still valid: wait up to 1 h
 
@@ -363,7 +362,7 @@ STATE = {
     "exp": 0.0,
     "blocked_until": 0.0,     # set when ՊԵԿ answered 0032 (a token we lost is still valid)
     "requested_at": 0.0,      # when the TITAN-TOKEN mail was last sent
-    "notified": False,        # "iPhone is silent" message already sent for this wait
+    "login_events": [],       # ՊԵԿ login answers relayed by /token, shown in the invoice log
 }
 TOKEN_EVENT = threading.Event()
 
@@ -400,6 +399,20 @@ def may_request_new_token():
     if t and now < exp + TOKEN_EXPIRY_GRACE:
         return False
     return True
+
+
+def next_attempt_at():
+    """When the bot will next ask the iPhone for a token."""
+    with STATE_LOCK:
+        t, exp, blocked, req = STATE["token"], STATE["exp"], STATE["blocked_until"], STATE["requested_at"]
+    candidates = [time.time()]
+    if blocked:
+        candidates.append(blocked)
+    if t:
+        candidates.append(exp + TOKEN_EXPIRY_GRACE)
+    if req:
+        candidates.append(req + MAIL_REPEAT_AFTER)
+    return max(candidates)
 
 
 def drop_token():
@@ -829,17 +842,24 @@ def handle_command(msg):
 
 def wait_for_token(chat_id, queue_len, log=_NoProgress()):
     """Blocks until a usable token exists. Sends the e-mail only when ՊԵԿ will
-    accept a new login, at most once per hour; tells the chat after 5 min."""
+    accept a new login, at most once per hour. Every ՊԵԿ login answer and the
+    time of the next attempt go into the invoice log."""
     WORKER["waiting_chat"], WORKER["queue_len"] = chat_id, queue_len
     mail_error_told = False
     with STATE_LOCK:
-        blocked = STATE["blocked_until"]
-    if blocked > time.time():
-        log.step(f"\u23f3 Token չկա. ՊԵԿ-ը նոր token կտա {_fmt_time(blocked)}-ից հետո")
-    else:
+        STATE["login_events"].clear()
+    if may_request_new_token():
         log.step("\u23f3 Token չկա կամ ժամկետանց է")
+    else:
+        log.step(f"\u23f3 Token չկա. Հաջորդ փորձը՝ {_fmt_time(next_attempt_at())}")
     try:
         while True:
+            with STATE_LOCK:
+                events, STATE["login_events"] = STATE["login_events"], []
+            for text in events:
+                log.step(text)
+                if not usable_token():
+                    log.step(f"\u21bb Հաջորդ փորձը՝ {_fmt_time(next_attempt_at())}")
             if usable_token():
                 with STATE_LOCK:
                     exp = STATE["exp"]
@@ -853,7 +873,7 @@ def wait_for_token(chat_id, queue_len, log=_NoProgress()):
                     try:
                         send_token_mail()
                         with STATE_LOCK:
-                            STATE["requested_at"], STATE["notified"] = now, False
+                            STATE["requested_at"] = now
                         log.step("\u2709 Email-ը ուղարկվեց iPhone-ին")
                     except Exception as e:
                         if not mail_error_told:
@@ -862,12 +882,6 @@ def wait_for_token(chat_id, queue_len, log=_NoProgress()):
                         TOKEN_EVENT.wait(300)
                         TOKEN_EVENT.clear()
                         continue
-            with STATE_LOCK:
-                req, notified = STATE["requested_at"], STATE["notified"]
-            if req and not notified and now - req > NOTIFY_AFTER:
-                log.step(f"\u23f3 iPhone-ը 5 րոպե պատասխան չի տալիս. հերթում՝ {queue_len}, սպասում եմ")
-                with STATE_LOCK:
-                    STATE["notified"] = True
             TOKEN_EVENT.wait(10)
             TOKEN_EVENT.clear()
             if not usable_token():
@@ -1015,14 +1029,20 @@ def receive_token():
         exp = _jwt_exp(token) or (time.time() + 3600)
         with STATE_LOCK:
             STATE.update(token=token, received=time.time(), exp=exp, blocked_until=0.0, requested_at=0.0)
+            STATE["login_events"].append("\u2714 ՊԵԿ login՝ հաջող")
         TOKEN_EVENT.set()
         return f"OK token valid until {_fmt_time(exp)}"
     code = re.search(r'Code="([^"]*)"', raw)
     code = code.group(1) if code else "?"
-    if code == "0032":
-        # A token we no longer know (e.g. after a restart) is still valid.
-        with STATE_LOCK:
+    text = re.search(r'Message="([^"]*)"', raw)
+    text = text.group(1) if text else raw.strip()[:200]
+    with STATE_LOCK:
+        if code == "0032":
+            # A token we no longer know (e.g. after a restart) is still valid.
             STATE["blocked_until"] = time.time() + BLOCK_AFTER_0032
+        STATE["login_events"].append(f"\u2716 ՊԵԿ-ը մերժեց login-ը՝ {code}: {text}")
+    TOKEN_EVENT.set()
+    if code == "0032":
         return "WAIT previous token still valid (0032)", 409
     return f"LOGIN FAILED code={code}", 400
 
