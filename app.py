@@ -912,7 +912,7 @@ class Skip(Exception):
     """Message can't become a draft; tell the chat and move on."""
 
 
-def prepare(text, log=_NoProgress()):
+def prepare(text, log=_NoProgress(), with_xml=True):
     try:
         parsed = parse_invoice_text(text)
     except IndexError:
@@ -944,11 +944,12 @@ def prepare(text, log=_NoProgress()):
 
     log.step("\u2714 Տվյալները գտնվեցին")
 
-    xml_bytes = build_xml(parsed, constants, buyer_info, goods)
-    errs = xsd_errors(xml_bytes)
-    if errs:
-        raise Skip("XSD ստուգումը չանցավ՝\n" + "\n".join(errs))
-    log.step("\u2714 XML-ը կազմվեց, XSD ստուգումն անցավ")
+    if with_xml:  # cancellations only need the data, not the XML
+        xml_bytes = build_xml(parsed, constants, buyer_info, goods)
+        errs = xsd_errors(xml_bytes)
+        if errs:
+            raise Skip("XSD ստուգումը չանցավ՝\n" + "\n".join(errs))
+        log.step("\u2714 XML-ը կազմվեց, XSD ստուգումն անցավ")
 
     return {"parsed": parsed, "constants": constants, "buyer": buyer_info, "goods": goods,
             "doc_id": str(uuid.uuid4())}
@@ -1167,7 +1168,7 @@ def worker_loop():
                                reply_to=msg.get("message_id"), with_file=False)
                 try:
                     body = INVOICE_HEADER + text[text.index("\n"):] if "\n" in text else text
-                    prepared = prepare(body, log)
+                    prepared = prepare(body, log, with_xml=False)
                     if not prepared:
                         _confirm(uid)
                         continue
