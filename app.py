@@ -463,14 +463,13 @@ class Progress:
 
     def __init__(self, chat_id, title, reply_to=None):
         self.chat_id, self.lines, self.message_id = chat_id, [title], None
-        self.reply_to, self.summary = reply_to, None
+        self.reply_to = reply_to
         self._send_placeholder()
 
     def _caption(self):
         head, steps = self.lines[:1], self.lines[1:]
-        tail = ["", self.summary] if self.summary else []
         while True:
-            text = "\n".join(head + steps + tail)
+            text = "\n".join(head + steps)
             if len(text) <= self.CAPTION_LIMIT or not steps:
                 return text[: self.CAPTION_LIMIT]
             steps = ["\u2026"] + steps[2:] if steps[0] == "\u2026" else ["\u2026"] + steps[1:]
@@ -503,7 +502,7 @@ class Progress:
             pass
 
     def step(self, text):
-        self.lines.append(f"{datetime.datetime.now(YEREVAN):%H:%M:%S}  {text}")
+        self.lines.append(f"{datetime.datetime.now(YEREVAN):%H:%M:%S} {text}")
         self._push()
 
     def _replace_file(self, filename, content, mime):
@@ -521,9 +520,8 @@ class Progress:
         except Exception:
             return False
 
-    def finish_pdf(self, filename, pdf, summary):
-        """Same message: placeholder file -> the draft PDF, log + summary as caption."""
-        self.summary = summary
+    def finish_pdf(self, filename, pdf):
+        """Same message: placeholder file -> the draft PDF, the log stays as caption."""
         return self._replace_file(filename, pdf, "application/pdf")
 
     def finish_without_pdf(self):
@@ -743,15 +741,14 @@ def pek_create_draft(token, parsed, constants, buyer_info, goods, doc_id, retry=
         log.step("\u2714 Սևագիրը արդեն ստեղծված էր (նախորդ փորձից)")
         return doc_id
     entity, items = build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id)
-    log.step(f"\u2714 ՊԵԿ դասակարգիչ՝ բոլոր կոդերը գտնվեցին, behalfOf={entity['behalfOf']}")
+    log.step("\u2714 ՊԵԿ դասակարգիչ՝ բոլոր կոդերը գտնվեցին")
     tin = entity["supplierTin"]
 
     check = pek_call(token, "goods/goods-validate-model", {"entity": entity, "items": items, "tin": tin})
     problems = validation_problems(check)
     if problems:
         raise PekError("validate", "; ".join(problems))
-    status = check.get("status") if isinstance(check, dict) else None
-    log.step(f"\u2714 ՊԵԿ վալիդացիան անցավ ({status or 'OK'})")
+    log.step("\u2714 ՊԵԿ վալիդացիան անցավ")
 
     pek_call(token, "goods/goods-create-draft", dict(entity, items=items))
     log.step("\u2714 Սևագիրը ստեղծվեց ՊԵԿ-ում")
@@ -829,16 +826,15 @@ def prepare(text, log=_NoProgress()):
     parsed = parse_invoice_text(text)
     if not parsed:
         return None  # e.g. a cancellation message
-    log.step(f"\u2714 Տեքստը կարդացվեց՝ {len(parsed['products'])} ապրանք, {_fmt_amount(parsed['total'])} դր.")
+    log.step("\u2714 Տեքստը կարդացվեց")
 
     wb = download_reference_workbook()
     constants = read_constants(wb["Constants"])
-    log.step("\u2714 Excel-ը բեռնվեց Drive-ից")
+    log.step("\u2714 Տվյալների դարանը բեռնվեց")
 
     buyer_info = lookup_counterparty(wb["Counterparties"], parsed["buyer"])
     if not buyer_info:
         raise Skip(f"Չգտա գործընկերոջը reference ֆայլում՝ {parsed['buyer']}")
-    log.step(f"\u2714 Գնորդը գտնվեց՝ ՀՎՀՀ {buyer_info['tin']}")
 
     goods = []
     for p in parsed["products"]:
@@ -851,7 +847,7 @@ def prepare(text, log=_NoProgress()):
             "net_unit": net_unit, "price": price, "vat": vat, "total_price": total_price,
         })
 
-    log.step(f"\u2714 Ապրանքները գտնվեցին՝ կոդեր {', '.join(sorted({_code_key(g['code']) for g in goods}))}")
+    log.step("\u2714 Տվյալները գտնվեցին")
 
     xml_bytes = build_xml(parsed, constants, buyer_info, goods)
     errs = xsd_errors(xml_bytes)
@@ -1067,19 +1063,13 @@ def worker_loop():
             _confirm(uid)
 
             p = prepared["parsed"]
-            summary = (
-                "\u2705 Սևագիրը ստեղծված է ՊԵԿ-ում\n"
-                f"Ամսաթիվ՝ {p['date']}\n"
-                f"Գնորդ՝ {p['buyer']}\n"
-                f"Գումար՝ {_fmt_amount(p['total'])} դր."
-            )
             try:
                 pdf = pek_draft_pdf(usable_token() or STATE["token"], doc_id)
-                log.step(f"\u2714 PDF-ը ստացվեց ՊԵԿ-ից ({max(1, len(pdf) // 1024)} ԿԲ)")
-                if not log.finish_pdf(f"sevagir-{p['date']}.pdf", pdf, summary):
+                log.step("\u2714 PDF-ը ստացվեց ՊԵԿ-ից")
+                if not log.finish_pdf(f"sevagir-{p['date']}.pdf", pdf):
                     # Editing failed (very rare): fall back to a separate reply.
-                    tg_send_document(chat_id, f"sevagir-{p['date']}.pdf", pdf, caption=summary,
-                                     reply_to=msg.get("message_id"))
+                    tg_send_document(chat_id, f"sevagir-{p['date']}.pdf", pdf,
+                                     caption=log._caption(), reply_to=msg.get("message_id"))
             except Exception as e:
                 log.step(f"\u26a0 PDF-ը չստացվեց՝ {e}. Սևագիրը կա ՊԵԿ-ում, PDF-ը վերցրու կայքից")
                 log.finish_without_pdf()
