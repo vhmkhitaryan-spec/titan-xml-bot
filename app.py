@@ -635,6 +635,7 @@ def build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id):
     entity = {
         "id": doc_id,
         "status": "DRAFT",
+        "createdAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
         "deliveredAt": f"{parsed['date']}T00:00:00.000Z",
         "behalfOf": behalf_of(constants),
         "supplierTin": str(constants.get("SupplierTIN") or ""),
