@@ -630,13 +630,15 @@ def build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id):
         "supplierAddress": constants.get("SupplierAddress"),
         "supplierBank": constants.get("SupplierBankName"),
         "supplierAccNo": str(constants.get("SupplierBankAccountNumber") or "") or None,
-        "sourceOtherAddress": constants.get("SupplyLocation"),            # (?)
+        "sourceFullAddress": constants.get("SupplyLocation"),
+        "sourceOtherAddress": constants.get("SupplyLocation"),
         "buyerHasNoTin": False,
         "buyerIsNatural": False,
         "buyerTin": str(buyer_info["tin"]),
         "buyerName": buyer_info["name"],
         "buyerAddress": buyer_info["address"],
-        "destinationOtherAddress": buyer_info["address"],                 # (?)
+        "destinationFullAddress": buyer_info["address"],
+        "destinationOtherAddress": buyer_info["address"],
         "deliveryMethod": parsed["driver"],
         "totalValue": total_value,
         "totalVatAmount": total_vat,
@@ -656,9 +658,8 @@ def validation_problems(result):
         return []
     status = str(result.get("status") or "").upper()
     details = result.get("details")
-    bad = status in ("ERROR", "ERRORS", "FAIL", "FAILED", "INVALID", "REJECTED")
-    if bad:
-        return [str(details or status)]
+    if any(w in status for w in ("ERROR", "FAIL", "INVALID", "REJECT")):
+        return [f"{status}: {details}" if details else status]
     return []
 
 
@@ -699,8 +700,10 @@ def pek_draft_pdf(token, doc_id):
     if url.startswith("/"):
         url = "https://e-invoicing.taxservice.am" + url
     r = requests.get(url, cookies={"jwt-auth-token": token}, timeout=60)
-    if r.status_code != 200 or not r.content:
-        raise PekTransient(f"PDF-ը չներբեռնվեց (HTTP {r.status_code})")
+    if r.status_code != 200 or not r.content.startswith(b"%PDF"):
+        head = r.content[:150].decode("utf-8", "replace").replace("\n", " ")
+        raise PekTransient(f"PDF-ի փոխարեն եկավ HTTP {r.status_code}, "
+                           f"{r.headers.get('content-type', '?')}, {len(r.content)} բայթ՝ {head}")
     return r.content
 
 
@@ -989,7 +992,7 @@ def worker_loop():
             )
             try:
                 pdf = pek_draft_pdf(usable_token() or STATE["token"], doc_id)
-                log.step(f"\u2714 PDF-ը ստացվեց ՊԵԿ-ից ({len(pdf) // 1024} ԿԲ)")
+                log.step(f"\u2714 PDF-ը ստացվեց ՊԵԿ-ից ({max(1, len(pdf) // 1024)} ԿԲ)")
                 tg_send_document(chat_id, f"sevagir-{p['date']}.pdf", pdf, caption=summary)
             except Exception as e:
                 log.step(f"\u26a0 PDF-ը չստացվեց՝ {e}")
