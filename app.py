@@ -913,7 +913,12 @@ class Skip(Exception):
 
 
 def prepare(text, log=_NoProgress()):
-    parsed = parse_invoice_text(text)
+    try:
+        parsed = parse_invoice_text(text)
+    except IndexError:
+        # The text ended before an expected line: a format problem, not a
+        # temporary one, so it must not block the queue with retries.
+        raise ValueError("Տեքստի կառուցվածքը չհասկացվեց. որոշ տողեր պակասում են")
     if not parsed:
         return None  # e.g. a cancellation message
     log.step("\u2714 Տեքստը կարդացվեց")
