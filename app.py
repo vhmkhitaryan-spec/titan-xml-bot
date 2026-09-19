@@ -439,6 +439,38 @@ def send_token_mail():
 # ---------------------------------------------------------------------------
 # 8. ՊԵԿ e-invoicing API
 # ---------------------------------------------------------------------------
+class Progress:
+    """One Telegram message per invoice that is edited as each step completes,
+    so the whole path of the invoice is visible without flooding the chat."""
+
+    def __init__(self, chat_id, title):
+        self.chat_id, self.lines, self.message_id = chat_id, [title], None
+        self._push()
+
+    def _push(self):
+        text = "\n".join(self.lines)[-4000:]
+        try:
+            if self.message_id is None:
+                r = requests.post(f"{TELEGRAM_API}/sendMessage",
+                                  json={"chat_id": self.chat_id, "text": text}, timeout=20).json()
+                self.message_id = (r.get("result") or {}).get("message_id")
+            else:
+                requests.post(f"{TELEGRAM_API}/editMessageText",
+                              json={"chat_id": self.chat_id, "message_id": self.message_id, "text": text},
+                              timeout=20)
+        except Exception:
+            pass
+
+    def step(self, text):
+        self.lines.append(f"{datetime.datetime.now(YEREVAN):%H:%M:%S}  {text}")
+        self._push()
+
+
+class _NoProgress:
+    def step(self, text):
+        pass
+
+
 class PekError(Exception):
     def __init__(self, code, message, auth=False):
         super().__init__(f"{code}: {message}")
@@ -479,6 +511,13 @@ def pek_call(token, path, payload, timeout=40):
 _CLASSIFIERS = {}
 
 
+def _code_key(v):
+    """Excel numbers come back as floats (4810.0); ՊԵԿ codes are '4810'."""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v).strip()
+
+
 def classifier_id(token, code):
     if not _CLASSIFIERS:
         data = pek_call(token, "dictionaries/classifier-list", {}) or []
@@ -486,8 +525,8 @@ def classifier_id(token, code):
             data = next((v for v in data.values() if isinstance(v, list)), [])
         for c in data:
             if isinstance(c, dict) and c.get("code"):
-                _CLASSIFIERS[str(c["code"]).strip()] = c.get("id")
-    return _CLASSIFIERS.get(str(code).strip())
+                _CLASSIFIERS[_code_key(c["code"])] = c.get("id")
+    return _CLASSIFIERS.get(_code_key(code))
 
 
 def _money(v):
@@ -522,7 +561,7 @@ def build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id):
     for i, g in enumerate(goods, start=1):
         cid = classifier_id(token, g["code"]) if g.get("code") else None
         if g.get("code") and not cid:
-            missing.append(str(g["code"]))
+            missing.append(_code_key(g["code"]))
         items.append({
             "mode": "new",
             "id": str(uuid.uuid4()),
@@ -539,7 +578,7 @@ def build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id):
             "total": _money(g["total_price"]),
         })
     if missing:
-        raise PekError("classifier", "ՊԵԿ-ի դասակարգչում չգտնվեցին կոդերը՝ " + ", ".join(missing))
+        raise PekError("classifier", "ՊԵԿ-ի դասակարգչում չգտնվեցին կոդերը՝ " + ", ".join(sorted(set(missing))))
 
     total_value = _money(sum(g["price"] for g in goods))
     total_vat = _money(sum(g["vat"] for g in goods))
@@ -595,20 +634,25 @@ def pek_draft_exists(token, doc_id):
         return False
 
 
-def pek_create_draft(token, parsed, constants, buyer_info, goods, doc_id, retry=False):
+def pek_create_draft(token, parsed, constants, buyer_info, goods, doc_id, retry=False, log=_NoProgress()):
     # A retry after a network error may follow a create that actually succeeded:
     # the id is fixed per message, so check before creating it again.
     if retry and pek_draft_exists(token, doc_id):
+        log.step("\u2714 Սևագիրը արդեն ստեղծված էր (նախորդ փորձից)")
         return doc_id
     entity, items = build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id)
+    log.step(f"\u2714 ՊԵԿ դասակարգիչ՝ բոլոր կոդերը գտնվեցին, behalfOf={entity['behalfOf']}")
     tin = entity["supplierTin"]
 
     check = pek_call(token, "goods/goods-validate-model", {"entity": entity, "items": items, "tin": tin})
     problems = validation_problems(check)
     if problems:
         raise PekError("validate", "; ".join(problems))
+    status = check.get("status") if isinstance(check, dict) else None
+    log.step(f"\u2714 ՊԵԿ վալիդացիան անցավ ({status or 'OK'})")
 
     pek_call(token, "goods/goods-create-draft", dict(entity, items=items))
+    log.step("\u2714 Սևագիրը ստեղծվեց ՊԵԿ-ում")
     return entity["id"]
 
 
@@ -663,17 +707,20 @@ class Skip(Exception):
     """Message can't become a draft; tell the chat and move on."""
 
 
-def prepare(text):
+def prepare(text, log=_NoProgress()):
     parsed = parse_invoice_text(text)
     if not parsed:
         return None  # e.g. a cancellation message
+    log.step(f"\u2714 Տեքստը կարդացվեց՝ {len(parsed['products'])} ապրանք, {_fmt_amount(parsed['total'])} դր.")
 
     wb = download_reference_workbook()
     constants = read_constants(wb["Constants"])
+    log.step("\u2714 Excel-ը բեռնվեց Drive-ից")
 
     buyer_info = lookup_counterparty(wb["Counterparties"], parsed["buyer"])
     if not buyer_info:
         raise Skip(f"Չգտա գործընկերոջը reference ֆայլում՝ {parsed['buyer']}")
+    log.step(f"\u2714 Գնորդը գտնվեց՝ ՀՎՀՀ {buyer_info['tin']}")
 
     goods = []
     for p in parsed["products"]:
@@ -686,10 +733,13 @@ def prepare(text):
             "net_unit": net_unit, "price": price, "vat": vat, "total_price": total_price,
         })
 
+    log.step(f"\u2714 Ապրանքները գտնվեցին՝ կոդեր {', '.join(sorted({_code_key(g['code']) for g in goods}))}")
+
     xml_bytes = build_xml(parsed, constants, buyer_info, goods)
     errs = xsd_errors(xml_bytes)
     if errs:
         raise Skip("XSD ստուգումը չանցավ՝\n" + "\n".join(errs))
+    log.step("\u2714 XML-ը կազմվեց, XSD ստուգումն անցավ")
 
     return {"parsed": parsed, "constants": constants, "buyer": buyer_info, "goods": goods,
             "doc_id": str(uuid.uuid4())}
@@ -739,14 +789,23 @@ def handle_command(msg):
     return False
 
 
-def wait_for_token(chat_id, queue_len):
+def wait_for_token(chat_id, queue_len, log=_NoProgress()):
     """Blocks until a usable token exists. Sends the e-mail only when ՊԵԿ will
     accept a new login, at most once per hour; tells the chat after 5 min."""
     WORKER["waiting_chat"], WORKER["queue_len"] = chat_id, queue_len
     mail_error_told = False
+    with STATE_LOCK:
+        blocked = STATE["blocked_until"]
+    if blocked > time.time():
+        log.step(f"\u23f3 Token չկա. ՊԵԿ-ը նոր token կտա {_fmt_time(blocked)}-ից հետո")
+    else:
+        log.step("\u23f3 Token չկա կամ ժամկետանց է")
     try:
         while True:
             if usable_token():
+                with STATE_LOCK:
+                    exp = STATE["exp"]
+                log.step(f"\u2714 Token-ը ստացվեց, վավեր է մինչև {_fmt_time(exp)}")
                 return
             now = time.time()
             if may_request_new_token():
@@ -757,9 +816,10 @@ def wait_for_token(chat_id, queue_len):
                         send_token_mail()
                         with STATE_LOCK:
                             STATE["requested_at"], STATE["notified"] = now, False
+                        log.step("\u2709 Email-ը ուղարկվեց iPhone-ին")
                     except Exception as e:
                         if not mail_error_told:
-                            tg_send_message(chat_id, f"\u26a0\ufe0f Email-ը չուղարկվեց՝ {e}. Կփորձեմ 5 րոպեն մեկ։")
+                            log.step(f"\u26a0 Email-ը չուղարկվեց՝ {e}. Կփորձեմ 5 րոպեն մեկ")
                             mail_error_told = True
                         TOKEN_EVENT.wait(300)
                         TOKEN_EVENT.clear()
@@ -767,11 +827,7 @@ def wait_for_token(chat_id, queue_len):
             with STATE_LOCK:
                 req, notified = STATE["requested_at"], STATE["notified"]
             if req and not notified and now - req > NOTIFY_AFTER:
-                tg_send_message(
-                    chat_id,
-                    f"\u23f3 iPhone-ը 5 րոպե է պատասխան չի տալիս։ Հերթում՝ {queue_len}։ "
-                    "Սպասում եմ token-ին. հեռախոսը միանալուն պես սևագրերը կսարքվեն հերթով։",
-                )
+                log.step(f"\u23f3 iPhone-ը 5 րոպե պատասխան չի տալիս. հերթում՝ {queue_len}, սպասում եմ")
                 with STATE_LOCK:
                     STATE["notified"] = True
             TOKEN_EVENT.wait(10)
@@ -800,24 +856,26 @@ def yield_commands():
             WORKER["handled_cmds"].add(u["update_id"])
 
 
-def process_invoice(msg, prepared, pending_after):
+def process_invoice(msg, prepared, pending_after, log=_NoProgress()):
     chat_id = msg["chat"]["id"]
     parsed = prepared["parsed"]
     retry = False
     while True:
         token = usable_token()
         if not token:
-            wait_for_token(chat_id, pending_after + 1)
+            wait_for_token(chat_id, pending_after + 1, log)
             continue
         try:
             doc_id = pek_create_draft(token, parsed, prepared["constants"], prepared["buyer"],
-                                      prepared["goods"], prepared["doc_id"], retry=retry)
-        except PekTransient:
+                                      prepared["goods"], prepared["doc_id"], retry=retry, log=log)
+        except PekTransient as e:
+            log.step(f"\u26a0 ՊԵԿ-ը չպատասխանեց ({e}), կփորձեմ 1 րոպեից")
             retry = True
             time.sleep(60)
             continue
         except PekError as e:
             if e.auth:
+                log.step("\u26a0 ՊԵԿ-ը token-ը չընդունեց, նորն եմ խնդրում")
                 drop_token()
                 continue
             raise Skip(f"ՊԵԿ-ը սևագիրը չընդունեց՝ {e.code}: {e.message}")
@@ -862,8 +920,9 @@ def worker_loop():
                 continue
 
             chat_id = msg["chat"]["id"]
+            log = Progress(chat_id, "\U0001f4e5 Հաշիվը ստացվեց, մշակում եմ")
             try:
-                prepared = prepare(text)
+                prepared = prepare(text, log)
                 if not prepared:
                     _confirm(uid)
                     continue
@@ -871,14 +930,15 @@ def worker_loop():
                     1 for x in updates[idx + 1:]
                     if _is_forward(x.get("message") or x.get("channel_post") or {})
                 )
-                chat_id, doc_id = process_invoice(msg, prepared, pending_after)
+                chat_id, doc_id = process_invoice(msg, prepared, pending_after, log)
             except (Skip, ValueError) as e:
-                tg_send_message(chat_id, f"\u274c {e}")
+                log.step(f"\u274c {e}")
+                log.step("Սևագիր չի ստեղծվել")
                 _confirm(uid)
                 continue
             except Exception as e:
                 # Unexpected (Drive down etc.): keep it in the queue, retry later.
-                tg_send_message(chat_id, f"\u26a0\ufe0f Ժամանակավոր սխալ՝ {type(e).__name__}. Կփորձեմ 1 րոպեից։")
+                log.step(f"\u26a0 Ժամանակավոր սխալ՝ {type(e).__name__}: {e}. Կփորձեմ 1 րոպեից")
                 time.sleep(60)
                 break
 
@@ -894,8 +954,10 @@ def worker_loop():
             )
             try:
                 pdf = pek_draft_pdf(usable_token() or STATE["token"], doc_id)
+                log.step(f"\u2714 PDF-ը ստացվեց ՊԵԿ-ից ({len(pdf) // 1024} ԿԲ)")
                 tg_send_document(chat_id, f"sevagir-{p['date']}.pdf", pdf, caption=summary)
             except Exception as e:
+                log.step(f"\u26a0 PDF-ը չստացվեց՝ {e}")
                 tg_send_message(chat_id, summary + f"\n(PDF-ը չստացվեց՝ {e})")
 
 
