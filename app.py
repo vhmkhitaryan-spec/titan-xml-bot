@@ -1,77 +1,76 @@
-import os
+"""
+Titan XML Bot
+-------------
+A forwarded Titan invoice message becomes a DRAFT goods tax invoice in the
+ՊԵԿ e-invoicing system, and the bot replies with a short summary + the
+draft's official PDF.
+
+Flow (per forwarded message, strictly in order):
+  parse text -> Excel lookups -> build XML -> XSD check (invoice.xsd)
+  -> token valid?  (read from the token's own `exp`, never by trying ՊԵԿ)
+       no  -> e-mail "TITAN-TOKEN" to the iPhone (the Shortcut logs in and
+              POSTs the token to /token), wait; after 5 min tell the chat,
+              keep waiting
+       yes -> goods-validate-model -> goods-create-draft -> goods-pdf-generate
+  -> summary + PDF to the chat
+
+Queue: Telegram itself. Updates are read with getUpdates and an update is
+confirmed (offset advanced) only after it is fully handled, so nothing is
+lost if Render restarts; Telegram keeps unconfirmed updates for 24 h.
+"""
+import base64
+import datetime
 import io
 import json
 import math
+import os
 import re
+import smtplib
+import threading
+import time
+import uuid
+from email.message import EmailMessage
 
 import openpyxl
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from lxml import etree
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-from pdf_invoice import build_invoice_pdf
-
 app = Flask(__name__)
 
 # ---------------------------------------------------------------------------
-# ՊԵԿ token store (token arrives from the iPhone Shortcut every 30 min)
+# 0. Configuration (Render -> Environment)
 # ---------------------------------------------------------------------------
-import base64
-import datetime
-import threading
-import time
-
-TOKEN_STATE = {"token": None, "received": 0.0, "exp": 0.0}
-TOKEN_LOCK = threading.Lock()
-YEREVAN = datetime.timezone(datetime.timedelta(hours=4))
-
-
-def _jwt_exp(token):
-    try:
-        part = token.split(".")[1]
-        part += "=" * (-len(part) % 4)
-        return float(json.loads(base64.urlsafe_b64decode(part)).get("exp", 0))
-    except Exception:
-        return 0.0
-
-
-def current_token():
-    """Returns a token that is still valid for at least 2 minutes, else None."""
-    with TOKEN_LOCK:
-        t, exp = TOKEN_STATE["token"], TOKEN_STATE["exp"]
-    if t and (exp == 0 or exp - time.time() > 120):
-        return t
-    return None
-
-
-def _fmt_time(ts):
-    return datetime.datetime.fromtimestamp(ts, YEREVAN).strftime("%H:%M")
-
-
-def _keepalive():
-    # Render free tier sleeps after ~15 min without traffic and forgets the token.
-    # While we hold a valid token, ping ourselves every 10 min to stay awake.
-    url = os.environ.get("RENDER_EXTERNAL_URL")
-    while True:
-        time.sleep(600)
-        if url and current_token():
-            try:
-                requests.get(url + "/", timeout=20)
-            except Exception:
-                pass
-
-
-threading.Thread(target=_keepalive, daemon=True).start()
-
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DRIVE_FILE_ID = os.environ["DRIVE_FILE_ID"]
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "")
+
+# E-mail that wakes the iPhone. Either RESEND_API_KEY (HTTPS API, works on
+# Render free) or SMTP (MAIL_FROM + MAIL_APP_PASSWORD, e.g. Gmail app password).
+MAIL_TO = os.environ.get("MAIL_TO", "")
+MAIL_FROM = os.environ.get("MAIL_FROM", "")
+MAIL_APP_PASSWORD = os.environ.get("MAIL_APP_PASSWORD", "")
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+MAIL_SUBJECT = "TITAN-TOKEN"
+
+PEK_API = "https://e-invoicing.taxservice.am/api"
+XSD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "invoice.xsd")
 
 NS = "http://www.taxservice.am/tp3/invoice/definitions"
 NSMAP = {"ns1": NS}
+YEREVAN = datetime.timezone(datetime.timedelta(hours=4))
+
+TOKEN_USE_MARGIN = 60          # use a token only if it has > 60 s left
+TOKEN_EXPIRY_GRACE = 15        # ask for a new one only 15 s after exp has passed
+NOTIFY_AFTER = 5 * 60          # "iPhone is silent" message after 5 min
+MAIL_REPEAT_AFTER = 60 * 60    # at most one e-mail per hour while waiting
+BLOCK_AFTER_0032 = 60 * 60     # ՊԵԿ says a token is still valid: wait up to 1 h
 
 INVOICE_HEADER = "Հաշիվ-ապրանքագիր"
 TG_DIVIDER_CHAR = "⠀"
@@ -337,181 +336,629 @@ def build_xml(parsed, constants, buyer_info, goods):
 
 
 # ---------------------------------------------------------------------------
-# 5. Telegram helpers
+# 5. XSD check (official schema from the ՊԵԿ integration package)
 # ---------------------------------------------------------------------------
+_XSD = None
+
+
+def xsd_errors(xml_bytes):
+    """Returns a list of human-readable schema errors ([] = valid)."""
+    global _XSD
+    if _XSD is None:
+        _XSD = etree.XMLSchema(etree.parse(XSD_PATH))
+    doc = etree.fromstring(xml_bytes)
+    if _XSD.validate(doc):
+        return []
+    return [f"տող {e.line}: {e.message}" for e in _XSD.error_log][:10]
+
+
+# ---------------------------------------------------------------------------
+# 6. Token store. Render decides validity from the token's own `exp`;
+#    it never "tries" ՊԵԿ with a token it knows is expired.
+# ---------------------------------------------------------------------------
+STATE_LOCK = threading.Lock()
+STATE = {
+    "token": None,
+    "received": 0.0,
+    "exp": 0.0,
+    "blocked_until": 0.0,     # set when ՊԵԿ answered 0032 (a token we lost is still valid)
+    "requested_at": 0.0,      # when the TITAN-TOKEN mail was last sent
+    "notified": False,        # "iPhone is silent" message already sent for this wait
+}
+TOKEN_EVENT = threading.Event()
+
+
+def _jwt_exp(token):
+    try:
+        part = token.split(".")[1]
+        part += "=" * (-len(part) % 4)
+        return float(json.loads(base64.urlsafe_b64decode(part)).get("exp", 0))
+    except Exception:
+        return 0.0
+
+
+def _fmt_time(ts):
+    return datetime.datetime.fromtimestamp(ts, YEREVAN).strftime("%H:%M")
+
+
+def usable_token():
+    with STATE_LOCK:
+        t, exp = STATE["token"], STATE["exp"]
+    if t and exp - time.time() > TOKEN_USE_MARGIN:
+        return t
+    return None
+
+
+def may_request_new_token():
+    """True only when ՊԵԿ will accept a new login: the known token's exp has
+    passed (plus grace) and we are not inside a 0032 block."""
+    now = time.time()
+    with STATE_LOCK:
+        t, exp, blocked = STATE["token"], STATE["exp"], STATE["blocked_until"]
+    if now < blocked:
+        return False
+    if t and now < exp + TOKEN_EXPIRY_GRACE:
+        return False
+    return True
+
+
+def drop_token():
+    with STATE_LOCK:
+        STATE["token"] = None
+
+
+# ---------------------------------------------------------------------------
+# 7. E-mail that triggers the iPhone automation
+# ---------------------------------------------------------------------------
+def send_token_mail():
+    body = "Titan XML Bot-ը ՊԵԿ token է խնդրում։ Այս նամակը iPhone-ի automation-ի համար է։"
+    if RESEND_API_KEY:
+        r = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+            json={
+                "from": MAIL_FROM or "Titan Bot <onboarding@resend.dev>",
+                "to": [MAIL_TO],
+                "subject": MAIL_SUBJECT,
+                "text": body,
+            },
+            timeout=20,
+        )
+        r.raise_for_status()
+        return
+    msg = EmailMessage()
+    msg["From"] = MAIL_FROM
+    msg["To"] = MAIL_TO
+    msg["Subject"] = MAIL_SUBJECT
+    msg.set_content(body)
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as s:
+        s.login(MAIL_FROM, MAIL_APP_PASSWORD)
+        s.send_message(msg)
+
+
+# ---------------------------------------------------------------------------
+# 8. ՊԵԿ e-invoicing API
+# ---------------------------------------------------------------------------
+class PekError(Exception):
+    def __init__(self, code, message, auth=False):
+        super().__init__(f"{code}: {message}")
+        self.code, self.message, self.auth = code, message, auth
+
+
+class PekTransient(Exception):
+    """Network trouble / 5xx: retry later, the message stays in the queue."""
+
+
+def pek_call(token, path, payload, timeout=40):
+    try:
+        r = requests.post(
+            f"{PEK_API}/{path}",
+            json={"payload": payload},
+            headers={"accept": "application/json"},
+            cookies={"jwt-auth-token": token},
+            timeout=timeout,
+        )
+    except requests.RequestException as e:
+        raise PekTransient(type(e).__name__)
+    if r.status_code in (401, 403):
+        raise PekError(str(r.status_code), "մուտքը մերժվեց", auth=True)
+    if r.status_code >= 500:
+        raise PekTransient(f"HTTP {r.status_code}")
+    try:
+        data = r.json()
+    except ValueError:
+        raise PekTransient(f"HTTP {r.status_code}, ոչ JSON պատասխան")
+    if not data.get("ok", False):
+        f = data.get("failure") or {}
+        code, message = str(f.get("code", "?")), str(f.get("message", ""))
+        auth = any(k in code.lower() for k in ("auth", "token", "session", "login"))
+        raise PekError(code, message, auth=auth)
+    return data.get("payload")
+
+
+_CLASSIFIERS = {}
+
+
+def classifier_id(token, code):
+    if not _CLASSIFIERS:
+        data = pek_call(token, "dictionaries/classifier-list", {}) or []
+        if isinstance(data, dict):
+            data = next((v for v in data.values() if isinstance(v, list)), [])
+        for c in data:
+            if isinstance(c, dict) and c.get("code"):
+                _CLASSIFIERS[str(c["code"]).strip()] = c.get("id")
+    return _CLASSIFIERS.get(str(code).strip())
+
+
+def _money(v):
+    return round(float(v), 2)
+
+
+# XML <Procedure> (invoice.xsd InvoiceProcedureType) -> API behalfOf.
+# The working XML uses Constants.GeneralInfoProcedure, so the API draft takes
+# the very same value: 2 = "on behalf of the taxpayer" -> TAXPAYER.
+_PROCEDURE_TO_BEHALF = {2: "TAXPAYER", 3: "SUPPLIER", 4: "PRINCIPAL", 6: "JOINT_CASE_MNG"}
+
+
+def behalf_of(constants):
+    explicit = constants.get("BehalfOf")
+    if explicit:
+        return str(explicit).strip()
+    try:
+        proc = int(constants.get("GeneralInfoProcedure", 2))
+    except (TypeError, ValueError):
+        proc = 2
+    if proc not in _PROCEDURE_TO_BEHALF:
+        raise PekError("procedure", f"GeneralInfoProcedure={proc}-ի համար API-ի համարժեք չկա")
+    return _PROCEDURE_TO_BEHALF[proc]
+
+
+def build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id):
+    """Maps our data onto the goods-create-draft model.
+    Field choices marked (?) are best guesses from the package; the
+    goods-validate-model step reports anything ՊԵԿ disagrees with."""
+    items = []
+    missing = []
+    for i, g in enumerate(goods, start=1):
+        cid = classifier_id(token, g["code"]) if g.get("code") else None
+        if g.get("code") and not cid:
+            missing.append(str(g["code"]))
+        items.append({
+            "mode": "new",
+            "id": str(uuid.uuid4()),
+            "invoiceId": doc_id,
+            "seqNo": i,
+            "classifierId": cid,
+            "name": g["name"],
+            "unit": g["unit"],
+            "quantity": g["qty"],
+            "unitPrice": g["net_unit"],
+            "totalValue": _money(g["price"]),
+            "vatRate": "VAT_20",
+            "vatAmount": _money(g["vat"]),
+            "total": _money(g["total_price"]),
+        })
+    if missing:
+        raise PekError("classifier", "ՊԵԿ-ի դասակարգչում չգտնվեցին կոդերը՝ " + ", ".join(missing))
+
+    total_value = _money(sum(g["price"] for g in goods))
+    total_vat = _money(sum(g["vat"] for g in goods))
+    total = _money(sum(g["total_price"] for g in goods))
+
+    entity = {
+        "id": doc_id,
+        "status": "DRAFT",
+        "deliveredAt": f"{parsed['date']}T00:00:00.000Z",
+        "behalfOf": behalf_of(constants),
+        "supplierTin": str(constants.get("SupplierTIN") or ""),
+        "supplierVatTin": str(constants.get("SupplierVATNumber") or "") or None,
+        "supplierName": constants.get("SupplierName"),
+        "supplierAddress": constants.get("SupplierAddress"),
+        "supplierBank": constants.get("SupplierBankName"),
+        "supplierAccNo": str(constants.get("SupplierBankAccountNumber") or "") or None,
+        "sourceOtherAddress": constants.get("SupplyLocation"),            # (?)
+        "buyerHasNoTin": False,
+        "buyerIsNatural": False,
+        "buyerTin": str(buyer_info["tin"]),
+        "buyerName": buyer_info["name"],
+        "buyerAddress": buyer_info["address"],
+        "destinationOtherAddress": buyer_info["address"],                 # (?)
+        "deliveryMethod": parsed["driver"],
+        "totalValue": total_value,
+        "totalVatAmount": total_vat,
+        "total": total,
+        "source": "API",
+        "finalUse": False,
+        "hasCodes": False,
+        "traceable": False,
+    }
+    entity = {k: v for k, v in entity.items() if v is not None}
+    return entity, items
+
+
+def validation_problems(result):
+    """goods-validate-model answer -> list of problems ([] = passed)."""
+    if not isinstance(result, dict):
+        return []
+    status = str(result.get("status") or "").upper()
+    details = result.get("details")
+    bad = status in ("ERROR", "ERRORS", "FAIL", "FAILED", "INVALID", "REJECTED")
+    if bad:
+        return [str(details or status)]
+    return []
+
+
+def pek_draft_exists(token, doc_id):
+    try:
+        return bool(pek_call(token, "goods/goods-by-id", {"id": doc_id}))
+    except PekError:
+        return False
+
+
+def pek_create_draft(token, parsed, constants, buyer_info, goods, doc_id, retry=False):
+    # A retry after a network error may follow a create that actually succeeded:
+    # the id is fixed per message, so check before creating it again.
+    if retry and pek_draft_exists(token, doc_id):
+        return doc_id
+    entity, items = build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id)
+    tin = entity["supplierTin"]
+
+    check = pek_call(token, "goods/goods-validate-model", {"entity": entity, "items": items, "tin": tin})
+    problems = validation_problems(check)
+    if problems:
+        raise PekError("validate", "; ".join(problems))
+
+    pek_call(token, "goods/goods-create-draft", dict(entity, items=items))
+    return entity["id"]
+
+
+def pek_draft_pdf(token, doc_id):
+    res = pek_call(token, "goods/goods-pdf-generate", {"id": doc_id}) or {}
+    url = res.get("url") if isinstance(res, dict) else None
+    if not url:
+        raise PekTransient("PDF-ի հղում չստացվեց")
+    if url.startswith("/"):
+        url = "https://e-invoicing.taxservice.am" + url
+    r = requests.get(url, cookies={"jwt-auth-token": token}, timeout=60)
+    if r.status_code != 200 or not r.content:
+        raise PekTransient(f"PDF-ը չներբեռնվեց (HTTP {r.status_code})")
+    return r.content
+
+
+# ---------------------------------------------------------------------------
+# 9. Telegram helpers
+# ---------------------------------------------------------------------------
+def tg(method, **params):
+    r = requests.post(f"{TELEGRAM_API}/{method}", json=params, timeout=params.get("timeout", 0) + 20)
+    return r.json()
+
 
 def tg_send_message(chat_id, text):
-    requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=20)
+    try:
+        requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=20)
+    except requests.RequestException:
+        pass
 
 
-def tg_send_document(chat_id, filename, content_bytes):
+def tg_send_document(chat_id, filename, content_bytes, mime="application/pdf", caption=None):
+    data = {"chat_id": chat_id}
+    if caption:
+        data["caption"] = caption
     requests.post(
         f"{TELEGRAM_API}/sendDocument",
-        data={"chat_id": chat_id},
-        files={"document": (filename, content_bytes, "application/xml")},
-        timeout=30,
+        data=data,
+        files={"document": (filename, content_bytes, mime)},
+        timeout=60,
     )
 
 
+def _fmt_amount(v):
+    return f"{v:,.2f}".replace(",", " ")
+
+
 # ---------------------------------------------------------------------------
-# 6. Webhook
+# 10. One forwarded message -> prepared invoice (no ՊԵԿ calls here)
 # ---------------------------------------------------------------------------
+class Skip(Exception):
+    """Message can't become a draft; tell the chat and move on."""
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = request.get_json(force=True, silent=True) or {}
-    message = update.get("message") or update.get("channel_post")
-    if not message:
-        return jsonify(ok=True)
 
-    chat_id = message["chat"]["id"]
-    text = message.get("text", "")
+def prepare(text):
+    parsed = parse_invoice_text(text)
+    if not parsed:
+        return None  # e.g. a cancellation message
 
-    if text.strip() == "/nettest":
-        lines = []
-        for name, url in [
-            ("ews login", "http://ews.taxservice.am/taxsystem-fe-ws/taxpayer/loginService"),
-            ("ews https", "https://ews.taxservice.am/taxsystem-fe-ws/taxpayer/loginService"),
-            ("e-invoicing", "https://e-invoicing.taxservice.am/api/invoice/invoice-count"),
-        ]:
-            try:
-                r = requests.post(url, data=b"", timeout=10)
-                lines.append(f"\u2705 {name}: HTTP {r.status_code}")
-            except Exception as e:
-                lines.append(f"\u274c {name}: {type(e).__name__}")
-        tg_send_message(chat_id, "\n".join(lines))
-        return jsonify(ok=True)
+    wb = download_reference_workbook()
+    constants = read_constants(wb["Constants"])
 
-    if text.strip() == "/tokenstatus":
-        tok = current_token()
-        with TOKEN_LOCK:
-            rec, exp = TOKEN_STATE["received"], TOKEN_STATE["exp"]
-        if not rec:
-            tg_send_message(chat_id, "\u274c Token դեռ չի ստացվել։")
-        elif not tok:
-            tg_send_message(chat_id, f"\u274c Token-ը ժամկետանց է. վերջինը ստացվել է {_fmt_time(rec)}-ին։")
-        else:
-            try:
-                r = requests.post(
-                    "https://e-invoicing.taxservice.am/api/invoice/invoice-count",
-                    json={"payload": {"condition": "(#status = 'ISSUED')"}},
-                    headers={"accept": "application/json"},
-                    cookies={"jwt-auth-token": tok},
-                    timeout=20,
+    buyer_info = lookup_counterparty(wb["Counterparties"], parsed["buyer"])
+    if not buyer_info:
+        raise Skip(f"Չգտա գործընկերոջը reference ֆայլում՝ {parsed['buyer']}")
+
+    goods = []
+    for p in parsed["products"]:
+        info = lookup_product(wb["Products"], p["name"])
+        if not info:
+            raise Skip(f"Չգտա ապրանքը reference ֆայլում՝ {p['name']}")
+        net_unit, price, vat, total_price = compute_good(p["qty"], p["gross_price"])
+        goods.append({
+            "name": p["name"], "unit": info["unit"], "code": info["code"], "qty": p["qty"],
+            "net_unit": net_unit, "price": price, "vat": vat, "total_price": total_price,
+        })
+
+    xml_bytes = build_xml(parsed, constants, buyer_info, goods)
+    errs = xsd_errors(xml_bytes)
+    if errs:
+        raise Skip("XSD ստուգումը չանցավ՝\n" + "\n".join(errs))
+
+    return {"parsed": parsed, "constants": constants, "buyer": buyer_info, "goods": goods,
+            "doc_id": str(uuid.uuid4())}
+
+
+# ---------------------------------------------------------------------------
+# 11. Worker: reads Telegram updates in order, confirms each only when done
+# ---------------------------------------------------------------------------
+WORKER = {"offset": None, "waiting_chat": None, "queue_len": 0, "handled_cmds": set()}
+
+
+def _is_forward(msg):
+    return any(k in msg for k in ("forward_origin", "forward_from", "forward_date"))
+
+
+def _confirm(update_id):
+    """Tell Telegram we are done with everything up to update_id."""
+    WORKER["offset"] = update_id + 1
+    try:
+        tg("getUpdates", offset=WORKER["offset"], limit=1, timeout=0)
+    except Exception:
+        pass
+
+
+def status_text():
+    with STATE_LOCK:
+        t, rec, exp, blocked = STATE["token"], STATE["received"], STATE["exp"], STATE["blocked_until"]
+    lines = []
+    if t and exp - time.time() > TOKEN_USE_MARGIN:
+        lines.append(f"\u2705 Token-ը վավեր է մինչև {_fmt_time(exp)} (ստացվել է {_fmt_time(rec)})")
+    elif rec:
+        lines.append(f"\u274c Token-ը ժամկետանց է. վերջինը ստացվել է {_fmt_time(rec)}-ին")
+    else:
+        lines.append("\u274c Token դեռ չկա")
+    if blocked > time.time():
+        lines.append(f"ՊԵԿ-ը նոր token կտա {_fmt_time(blocked)}-ից հետո")
+    if WORKER["waiting_chat"]:
+        lines.append(f"Սպասում է token-ի, հերթում՝ {WORKER['queue_len']}")
+    return "\n".join(lines)
+
+
+def handle_command(msg):
+    text = (msg.get("text") or "").strip()
+    if text.startswith("/tokenstatus") or text.startswith("/status"):
+        tg_send_message(msg["chat"]["id"], status_text())
+        return True
+    return False
+
+
+def wait_for_token(chat_id, queue_len):
+    """Blocks until a usable token exists. Sends the e-mail only when ՊԵԿ will
+    accept a new login, at most once per hour; tells the chat after 5 min."""
+    WORKER["waiting_chat"], WORKER["queue_len"] = chat_id, queue_len
+    mail_error_told = False
+    try:
+        while True:
+            if usable_token():
+                return
+            now = time.time()
+            if may_request_new_token():
+                with STATE_LOCK:
+                    last = STATE["requested_at"]
+                if now - last > MAIL_REPEAT_AFTER:
+                    try:
+                        send_token_mail()
+                        with STATE_LOCK:
+                            STATE["requested_at"], STATE["notified"] = now, False
+                    except Exception as e:
+                        if not mail_error_told:
+                            tg_send_message(chat_id, f"\u26a0\ufe0f Email-ը չուղարկվեց՝ {e}. Կփորձեմ 5 րոպեն մեկ։")
+                            mail_error_told = True
+                        TOKEN_EVENT.wait(300)
+                        TOKEN_EVENT.clear()
+                        continue
+            with STATE_LOCK:
+                req, notified = STATE["requested_at"], STATE["notified"]
+            if req and not notified and now - req > NOTIFY_AFTER:
+                tg_send_message(
+                    chat_id,
+                    f"\u23f3 iPhone-ը 5 րոպե է պատասխան չի տալիս։ Հերթում՝ {queue_len}։ "
+                    "Սպասում եմ token-ին. հեռախոսը միանալուն պես սևագրերը կսարքվեն հերթով։",
                 )
-                code = (r.json().get("failure") or {}).get("code", "ok")
+                with STATE_LOCK:
+                    STATE["notified"] = True
+            TOKEN_EVENT.wait(10)
+            TOKEN_EVENT.clear()
+            if not usable_token():
+                yield_commands()
+    finally:
+        WORKER["waiting_chat"] = None
+
+
+def yield_commands():
+    """While waiting, still answer /tokenstatus sent after the blocked message
+    (without confirming anything)."""
+    try:
+        params = {"timeout": 0, "allowed_updates": ["message", "channel_post"]}
+        if WORKER["offset"] is not None:
+            params["offset"] = WORKER["offset"]
+        res = tg("getUpdates", **params)
+    except Exception:
+        return
+    for u in res.get("result", []):
+        msg = u.get("message") or u.get("channel_post")
+        if not msg or u["update_id"] in WORKER["handled_cmds"]:
+            continue
+        if (msg.get("text") or "").startswith("/") and handle_command(msg):
+            WORKER["handled_cmds"].add(u["update_id"])
+
+
+def process_invoice(msg, prepared, pending_after):
+    chat_id = msg["chat"]["id"]
+    parsed = prepared["parsed"]
+    retry = False
+    while True:
+        token = usable_token()
+        if not token:
+            wait_for_token(chat_id, pending_after + 1)
+            continue
+        try:
+            doc_id = pek_create_draft(token, parsed, prepared["constants"], prepared["buyer"],
+                                      prepared["goods"], prepared["doc_id"], retry=retry)
+        except PekTransient:
+            retry = True
+            time.sleep(60)
+            continue
+        except PekError as e:
+            if e.auth:
+                drop_token()
+                continue
+            raise Skip(f"ՊԵԿ-ը սևագիրը չընդունեց՝ {e.code}: {e.message}")
+        return chat_id, doc_id
+
+
+def worker_loop():
+    # Switch Telegram from webhook to getUpdates. Pending updates are kept.
+    try:
+        tg("deleteWebhook", drop_pending_updates=False)
+    except Exception:
+        pass
+
+    while True:
+        try:
+            params = {"timeout": 50, "allowed_updates": ["message", "channel_post"]}
+            if WORKER["offset"] is not None:
+                params["offset"] = WORKER["offset"]
+            res = tg("getUpdates", **params)
+            updates = res.get("result", []) if res.get("ok") else []
+        except Exception:
+            time.sleep(5)
+            continue
+
+        for idx, u in enumerate(updates):
+            uid = u["update_id"]
+            msg = u.get("message") or u.get("channel_post")
+            if not msg:
+                _confirm(uid)
+                continue
+
+            text = msg.get("text") or ""
+            if text.startswith("/"):
+                if uid not in WORKER["handled_cmds"]:
+                    handle_command(msg)
+                WORKER["handled_cmds"].discard(uid)
+                _confirm(uid)
+                continue
+
+            if not _is_forward(msg):
+                _confirm(uid)
+                continue
+
+            chat_id = msg["chat"]["id"]
+            try:
+                prepared = prepare(text)
+                if not prepared:
+                    _confirm(uid)
+                    continue
+                pending_after = sum(
+                    1 for x in updates[idx + 1:]
+                    if _is_forward(x.get("message") or x.get("channel_post") or {})
+                )
+                chat_id, doc_id = process_invoice(msg, prepared, pending_after)
+            except (Skip, ValueError) as e:
+                tg_send_message(chat_id, f"\u274c {e}")
+                _confirm(uid)
+                continue
             except Exception as e:
-                code = type(e).__name__
-            tg_send_message(
-                chat_id,
-                f"\u2705 Token-ը կա\nՍտացվել է՝ {_fmt_time(rec)}\nՎավեր է մինչև՝ {_fmt_time(exp) if exp else '?'}\nՊԵԿ-ի պատասխան՝ {code}",
+                # Unexpected (Drive down etc.): keep it in the queue, retry later.
+                tg_send_message(chat_id, f"\u26a0\ufe0f Ժամանակավոր սխալ՝ {type(e).__name__}. Կփորձեմ 1 րոպեից։")
+                time.sleep(60)
+                break
+
+            # Draft exists in ՊԵԿ: confirm first so a restart can never create it twice.
+            _confirm(uid)
+
+            p = prepared["parsed"]
+            summary = (
+                "\u2705 Սևագիրը ստեղծված է ՊԵԿ-ում\n"
+                f"Ամսաթիվ՝ {p['date']}\n"
+                f"Գնորդ՝ {p['buyer']}\n"
+                f"Գումար՝ {_fmt_amount(p['total'])} դր."
             )
-        return jsonify(ok=True)
-
-    # Only ever act on genuinely FORWARDED messages (see design notes: a Reply
-    # does not expose a bot-authored message's content cross-bot, a Forward does).
-    if "forward_origin" not in message and "forward_from" not in message and "forward_date" not in message:
-        return jsonify(ok=True)
-
-    try:
-        parsed = parse_invoice_text(text)
-        if not parsed:
-            return jsonify(ok=True)  # e.g. a cancellation message - nothing to do
-
-        wb = download_reference_workbook()
-        constants = read_constants(wb["Constants"])
-
-        buyer_info = lookup_counterparty(wb["Counterparties"], parsed["buyer"])
-        if not buyer_info:
-            tg_send_message(chat_id, f"Չգտա գործընկերոջը reference ֆայլում՝ {parsed['buyer']}")
-            return jsonify(ok=True)
-
-        goods = []
-        for p in parsed["products"]:
-            info = lookup_product(wb["Products"], p["name"])
-            if not info:
-                tg_send_message(chat_id, f"Չգտա ապրանքը reference ֆայլում՝ {p['name']}")
-                return jsonify(ok=True)
-            net_unit, price, vat, total_price = compute_good(p["qty"], p["gross_price"])
-            goods.append(
-                {
-                    "name": p["name"],
-                    "unit": info["unit"],
-                    "code": info["code"],
-                    "qty": p["qty"],
-                    "net_unit": net_unit,
-                    "price": price,
-                    "vat": vat,
-                    "total_price": total_price,
-                }
-            )
-
-        xml_bytes = build_xml(parsed, constants, buyer_info, goods)
-        xml_filename = f"invoice-{parsed['date']}.xml"
-        tg_send_document(chat_id, xml_filename, xml_bytes)
-
-        pdf_buf = io.BytesIO()
-        build_invoice_pdf(parsed, constants, buyer_info, goods, pdf_buf)
-        pdf_filename = f"invoice-{parsed['date']}.pdf"
-        tg_send_document(chat_id, pdf_filename, pdf_buf.getvalue())
-    except Exception as e:
-        tg_send_message(chat_id, f"Սխալ. {e}")
-
-    return jsonify(ok=True)
+            try:
+                pdf = pek_draft_pdf(usable_token() or STATE["token"], doc_id)
+                tg_send_document(chat_id, f"sevagir-{p['date']}.pdf", pdf, caption=summary)
+            except Exception as e:
+                tg_send_message(chat_id, summary + f"\n(PDF-ը չստացվեց՝ {e})")
 
 
 # ---------------------------------------------------------------------------
-# TEMP: token test (does a token obtained in Armenia work from Render?)
+# 12. HTTP routes (the iPhone Shortcut posts here) + keep-alive
 # ---------------------------------------------------------------------------
-
-@app.route("/tokentest", methods=["POST"])
-def tokentest():
-    secret = os.environ.get("TOKEN_SECRET", "")
-    if not secret or request.headers.get("X-Secret") != secret:
-        return jsonify(ok=False, error="forbidden"), 403
-    data = request.get_json(force=True, silent=True) or {}
-    token = str(data.get("token", ""))
-    tin = str(data.get("tin", ""))
-    if not token or not tin.isdigit():
-        return jsonify(ok=False, error="token and numeric tin required"), 400
-    try:
-        r = requests.post(
-            "https://e-invoicing.taxservice.am/api/invoice/invoice-count",
-            json={"payload": {"condition": f"(#supplierTin = '{tin}')"}},
-            headers={"accept": "application/json"},
-            cookies={"jwt-auth-token": token},
-            timeout=20,
-        )
-        return jsonify(ok=True, status=r.status_code, body=r.text[:500])
-    except Exception as e:
-        return jsonify(ok=False, error=f"{type(e).__name__}: {e}")
-
-
 @app.route("/token", methods=["POST"])
 def receive_token():
-    """The iPhone Shortcut posts the raw ՊԵԿ login response here."""
-    secret = os.environ.get("TOKEN_SECRET", "")
-    if not secret or request.headers.get("X-Secret") != secret:
+    """Body = raw ՊԵԿ login response. Replies in plain ASCII so the iPhone
+    notification is always readable."""
+    if not TOKEN_SECRET or request.headers.get("X-Secret") != TOKEN_SECRET:
         return "forbidden", 403
     raw = request.get_data(as_text=True) or ""
     m = re.search(r"<(?:\w+:)?AuthToken>\s*(.*?)\s*</(?:\w+:)?AuthToken>", raw, re.S)
     if m:
         token = m.group(1)
-    elif raw.strip().count(".") == 2 and "<" not in raw:
-        token = raw.strip()
-    else:
-        s = re.search(r'Message="([^"]*)"', raw)
-        return "ՊԵԿ login-ը չհաջողվեց" + (f"՝ {s.group(1)}" if s else ""), 400
-    exp = _jwt_exp(token)
-    with TOKEN_LOCK:
-        TOKEN_STATE.update(token=token, received=time.time(), exp=exp)
-    return f"OK, token-ը վավեր է մինչև {_fmt_time(exp) if exp else '?'}"
+        exp = _jwt_exp(token) or (time.time() + 3600)
+        with STATE_LOCK:
+            STATE.update(token=token, received=time.time(), exp=exp, blocked_until=0.0, requested_at=0.0)
+        TOKEN_EVENT.set()
+        return f"OK token valid until {_fmt_time(exp)}"
+    code = re.search(r'Code="([^"]*)"', raw)
+    code = code.group(1) if code else "?"
+    if code == "0032":
+        # A token we no longer know (e.g. after a restart) is still valid.
+        with STATE_LOCK:
+            STATE["blocked_until"] = time.time() + BLOCK_AFTER_0032
+        return "WAIT previous token still valid (0032)", 409
+    return f"LOGIN FAILED code={code}", 400
 
 
 @app.route("/", methods=["GET"])
 def health():
     return "ok"
 
+
+def _keepalive():
+    # Render free sleeps after ~15 min without inbound traffic; the worker
+    # must keep running, so ping our own public URL every 10 min.
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    while True:
+        time.sleep(600)
+        if url:
+            try:
+                requests.get(url + "/", timeout=20)
+            except Exception:
+                pass
+
+
+_started = False
+
+
+def start_background():
+    global _started
+    if _started:
+        return
+    _started = True
+    threading.Thread(target=worker_loop, daemon=True, name="worker").start()
+    threading.Thread(target=_keepalive, daemon=True, name="keepalive").start()
+
+
+if os.environ.get("TITAN_NO_WORKER") != "1":
+    start_background()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))

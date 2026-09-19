@@ -1,0 +1,646 @@
+<?xml version="1.1" encoding="utf-8"?>
+<xs:schema targetNamespace="http://www.taxservice.am/tp3/invoice/definitions"
+	xmlns="http://www.w3.org/2001/XMLSchema" xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:tax="http://www.taxservice.am/tp3/invoice/definitions"
+	elementFormDefault="qualified">
+
+			<xs:simpleType name="VATNumberType">
+				<xs:restriction base="xs:string">
+					<xs:minLength value="0" />
+					<xs:maxLength value="10" />
+				</xs:restriction>
+			</xs:simpleType>
+
+			<xs:simpleType name="InvoiceProcedureType">
+				<xs:restriction base="xs:int">
+					<xs:enumeration value="1" /> <!-- Hatuk -->
+					<xs:enumeration value="2" /> <!-- Hark vcharoxi anunic -->
+					<xs:enumeration value="3" /> <!-- Matakarari anunic -->
+          <xs:enumeration value="4" /> <!-- Principali anunic -->
+					<xs:enumeration value="5" /> <!-- Principali hatuk anunic -->
+					<xs:enumeration value="6" /> <!-- Hamategh gorc varoghi anunic -->
+					<xs:enumeration value="7" /> <!-- Hamategh gorc varoghi hatuk anunic -->
+					<xs:enumeration value="8" /> <!-- AHH veradarc -->
+				</xs:restriction>
+			</xs:simpleType>
+
+      <xs:simpleType name="PIDType">
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="RA_PASSPORT" />
+          <xs:enumeration value="BIRTH_CERT" />
+          <xs:enumeration value="RESIDENCE_CARD" />
+          <xs:enumeration value="CONVENTIONAL_TRAVEL_DOCUMENT" />
+          <xs:enumeration value="ID_CARD" />
+          <xs:enumeration value="BIOMETRIC_PASSPORT" />
+          <xs:enumeration value="FOREIGN_PASSPORT_WORK" />
+          <xs:enumeration value="FOREIGN_PASSPORT" />
+          <xs:enumeration value="FOREIGN_BIRTH_CERT" />
+        </xs:restriction>
+      </xs:simpleType>
+
+      <xs:simpleType name="PreviousDocumentType">
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="CUSTOMS_DECLARATION" />
+          <xs:enumeration value="ACCOUNTING_DOCUMENT" />
+          <xs:enumeration value="INVENTORY_ACT" />
+          <xs:enumeration value="OTHER" />
+        </xs:restriction>
+      </xs:simpleType>
+
+      <xs:simpleType name="SocialCostType">
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="HEALTH_INSURANCE" />
+          <xs:enumeration value="EDUCATIONAL_COST" />
+          <xs:enumeration value="DENTAL_SERVICES" />
+          <xs:enumeration value="OTHER" />
+        </xs:restriction>
+      </xs:simpleType>
+
+      <xs:simpleType name="DealType">
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="VAT_OTHER" />
+          <xs:enumeration value="VAT_ZERO_RATE" />
+          <xs:enumeration value="VAT_EXEMPT" />
+        </xs:restriction>
+      </xs:simpleType>
+
+      <xs:simpleType name="IdentityType">
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="RA_PASSPORT" />
+          <xs:enumeration value="BIRTH_CERT" />
+          <xs:enumeration value="ID_CARD" />
+          <xs:enumeration value="BIOMETRIC_PASSPORT" />
+        </xs:restriction>
+      </xs:simpleType>
+
+			<xs:simpleType name="InvoiceTypeType">
+				<xs:restriction base="xs:int">
+					<xs:enumeration value="1" /> <!-- Apranqner -->
+					<xs:enumeration value="2" /> <!-- Akcizayin harkvox apranqner -->
+					<xs:enumeration value="3" /> <!-- Tsarayutyunner -->
+					<xs:enumeration value="4" /> <!-- Lizing -->
+				</xs:restriction>
+			</xs:simpleType>
+
+
+			<xs:simpleType name="InvalidationTypeType">
+				<xs:restriction base="xs:int">
+					<xs:enumeration value="1" /> <!-- INVALID -->
+					<xs:enumeration value="3" /> <!-- CONFIRMED -->
+					<xs:enumeration value="15" /> <!-- WAITING_INVALIDATION_ACCEPTANCE -->
+				</xs:restriction>
+			</xs:simpleType>
+
+			<xs:simpleType name="InvNumberType">
+				<xs:restriction base="xs:string">
+					<xs:maxLength value="10" />
+					<xs:minLength value="0" />
+				</xs:restriction>
+			</xs:simpleType>
+
+			<xs:simpleType name="InvSeriesType">
+				<xs:restriction base="xs:string">
+					<xs:maxLength value="1" />
+					<xs:minLength value="0" />
+				</xs:restriction>
+			</xs:simpleType>
+
+			<xs:simpleType name="TinType">
+				<xs:restriction base="xs:string">
+					<xs:minLength value="0" />
+					<xs:maxLength value="14" />
+				</xs:restriction>
+			</xs:simpleType>
+
+			<xs:simpleType name="CompanyNameType">
+				<xs:restriction base="xs:string">
+					<xs:minLength value="0" />
+					<xs:maxLength value="512" />
+				</xs:restriction>
+			</xs:simpleType>
+
+      <xs:simpleType name="SupplierNameSurnameType">
+          <xs:restriction base="xs:string">
+              <xs:minLength value="0"/>
+              <xs:maxLength value="255"/>
+          </xs:restriction>
+      </xs:simpleType>
+
+			<xs:simpleType name="StringInputType">
+				<xs:restriction base="xs:string">
+					<xs:minLength value="0" />
+					<xs:maxLength value="256" />
+				</xs:restriction>
+			</xs:simpleType>
+
+      <xs:simpleType name="StringInputType1">
+        <xs:restriction base="xs:string">
+          <xs:minLength value="0" />
+          <xs:maxLength value="356" />
+        </xs:restriction>
+      </xs:simpleType>
+
+      <xs:simpleType name="StringInputType2">
+        <xs:restriction base="xs:string">
+          <xs:minLength value="0" />
+          <xs:maxLength value="40" />
+        </xs:restriction>
+      </xs:simpleType>
+
+			<xs:simpleType name="ParentInvoiceNumberInputType">
+				<xs:restriction base="xs:string">
+					<xs:minLength value="0" />
+					<xs:maxLength value="11" />
+				</xs:restriction>
+			</xs:simpleType>
+
+			<xs:simpleType name="BookNumberType">
+				<xs:restriction base="xs:int">
+					<xs:minInclusive value="1" />
+					<xs:maxExclusive value="100000" />
+				</xs:restriction>
+			</xs:simpleType>
+
+			<xs:simpleType name="Unit">
+				<xs:restriction base="xs:string">
+					<xs:minLength value="0" />
+					<xs:maxLength value="50" />
+				</xs:restriction>
+			</xs:simpleType>
+
+      <xs:simpleType name="Classification">
+          <xs:restriction base="xs:string">
+              <xs:minLength value="0"/>
+              <xs:maxLength value="550"/>
+          </xs:restriction>
+      </xs:simpleType>
+
+      <xs:simpleType name="ClassifierCode">
+        <xs:restriction base="xs:string">
+          <xs:minLength value="0"/>
+          <xs:maxLength value="4"/>
+        </xs:restriction>
+      </xs:simpleType>
+
+			<xs:simpleType name="GoodName">
+				<xs:restriction base="xs:string">
+					<xs:minLength value="1" />
+					<xs:maxLength value="256" />
+				</xs:restriction>
+			</xs:simpleType>
+
+      <xs:simpleType name="GoodId">
+        <xs:restriction base="xs:string">
+          <xs:length value="36" />
+        </xs:restriction>
+      </xs:simpleType>
+
+      <xs:simpleType name="PSNOrAbsenceType">
+        <xs:restriction base="xs:string">
+          <xs:minLength value="1" />
+          <xs:maxLength value="10" />
+        </xs:restriction>
+      </xs:simpleType>
+
+      <xs:simpleType name="PreviousDocumentNumber">
+        <xs:restriction base="xs:string">
+          <xs:minLength value="1" />
+          <xs:maxLength value="23" />
+        </xs:restriction>
+      </xs:simpleType>
+
+      <xs:simpleType name="ProductFEACNCode">
+        <xs:restriction base="xs:string">
+          <xs:length value="10" />
+        </xs:restriction>
+      </xs:simpleType>
+
+      <xs:simpleType name="QuantityByFEACN">
+        <xs:restriction base="tax:Double1" />
+      </xs:simpleType>
+
+      <xs:simpleType name="SeqNoByPreviousDoc">
+        <xs:restriction base="xs:long" />
+      </xs:simpleType>
+
+      <xs:simpleType name="UnitByFEACNCode">
+        <xs:restriction base="xs:string">
+          <xs:length value="3" />
+        </xs:restriction>
+      </xs:simpleType>
+
+			<xs:simpleType name="Double">
+				<xs:restriction base="xs:decimal">
+					<xs:fractionDigits value="2" />
+					<xs:maxInclusive value="999999999999.99" />
+				</xs:restriction>
+			</xs:simpleType>
+
+      <xs:simpleType name="Double1">
+        <xs:restriction base="xs:decimal">
+          <xs:fractionDigits value="3" />
+          <xs:maxInclusive value="999999999999.999" />
+        </xs:restriction>
+      </xs:simpleType>
+
+			<xs:simpleType name="Double4">
+				<xs:restriction base="xs:decimal">
+					<xs:fractionDigits value="4" />
+					<xs:maxInclusive value="999999999999.9999" />
+				</xs:restriction>
+			</xs:simpleType>
+
+			<xs:simpleType name="Double5">
+				<xs:restriction base="xs:decimal">
+					<xs:fractionDigits value="5" />
+					<xs:maxInclusive value="999999999999.99999" />
+				</xs:restriction>
+			</xs:simpleType>
+
+			<xs:simpleType name="Double12">
+				<xs:restriction base="xs:decimal">
+					<xs:fractionDigits value="12" />
+					<xs:maxInclusive value="999999999999.999999999999" />
+				</xs:restriction>
+			</xs:simpleType>
+
+      <xs:simpleType name="Double6">
+        <xs:restriction base="xs:decimal">
+          <xs:fractionDigits value="4" />
+          <xs:maxInclusive value="99.9999" />
+        </xs:restriction>
+      </xs:simpleType>
+
+			<xs:simpleType name="PassportType">
+				<xs:restriction base="xs:string">
+					<xs:maxLength value="22" />
+				</xs:restriction>
+			</xs:simpleType>
+
+      <xs:complexType name="CarInfo">
+        <xs:all>
+          <xs:element name="Make" type="tax:StringInputType" minOccurs="0"/>
+          <xs:element name="PlateNumber" type="tax:StringInputType2" minOccurs="0"/>
+        </xs:all>
+      </xs:complexType>
+
+			<xs:complexType name="InvoiceNumber">
+				<xs:all>
+					<xs:element name="Number" type="tax:InvNumberType" minOccurs="0" />
+					<xs:element name="Series" type="tax:InvSeriesType" minOccurs="0" />
+				</xs:all>
+			</xs:complexType>
+
+			<xs:complexType name="InvalidationBatchEntry">
+				<xs:all>
+					<xs:element name="InvoiceNumber" type="tax:InvoiceNumber" />
+					<xs:element name="Reason" type="tax:StringInputType" />
+				</xs:all>
+			</xs:complexType>
+
+			<!-- End of basic types -->
+
+			<!-- Invoice elements -->
+
+			<!--
+				Describes the information on deal and delivery book for the invoice
+				(fields 5-9)
+			-->
+			<xs:complexType name="DealInfo">
+				<xs:all>
+					<!-- The deal date (field 5) -->
+					<xs:element name="DealDate" type="xs:date" minOccurs="0" />
+					<!-- The deal number (field 6) -->
+					<xs:element name="DealNumber" type="tax:StringInputType"
+						minOccurs="0" />
+					<!-- Delivery book page (field 7) -->
+					<xs:element name="DeliveryBookPage" type="tax:BookNumberType"
+						minOccurs="0" />
+					<!-- Delivery book line (field 8) -->
+					<xs:element name="DeliveryBookLine" type="tax:BookNumberType"
+						minOccurs="0" />
+					<!-- Delivery book number (field 9) -->
+					<xs:element name="DeliveryBookNumber" type="tax:BookNumberType"
+						minOccurs="0" />
+				</xs:all>
+			</xs:complexType>
+
+      <xs:complexType name="ContractInfo">
+          <xs:all>
+              <xs:element name="ContractDate" type="xs:date" minOccurs="0"/>
+              <xs:element name="ContractNumber" type="tax:StringInputType"
+                          minOccurs="0"/>
+          </xs:all>
+      </xs:complexType>
+
+			<!-- Describes the top section of the invoice (fields 1-10) -->
+			<xs:complexType name="GeneralInfo">
+				<xs:all>
+					<!-- The parent invoice -->
+					<xs:element name="ParentInvoiceNumber" type="tax:ParentInvoiceNumberInputType" minOccurs="0"/>
+					<!-- Ecr Receipt -->
+					<xs:element name="EcrReceipt" type="tax:StringInputType" minOccurs="0"/>
+				 	<!-- The ParentInvoiceSubmitDate -->
+					<xs:element name="ParentInvoiceSubmitDate" type="xs:date" minOccurs="0" />
+					<!-- The invoice number with series (fields 2 and 3) -->
+					<xs:element name="InvoiceNumber" type="tax:InvoiceNumber" minOccurs="0"/>
+          <!-- Adjustment diff flag ( -1 or 1 ) -->
+          <xs:element name="AdjustmentDiffFlag" type="xs:int" minOccurs="0"/>
+					<!-- The supply date (field 4) -->
+					<xs:element name="SupplyDate" type="xs:date" minOccurs="0" />
+					<!-- The 'special' flag -->
+					<xs:element name="Procedure" type="tax:InvoiceProcedureType"
+						minOccurs="0" />
+					<!--
+						Describes the information on deal and delivery book for the
+						invoice (fields 5-9)
+					-->
+					<xs:element name="DealInfo" type="tax:DealInfo" minOccurs="0" />
+					<xs:element name="AdditionalData" type="tax:StringInputType"
+						minOccurs="0" />
+					<xs:element name="AdjustmentAccount" type="xs:boolean" minOccurs="0"/>
+				</xs:all>
+			</xs:complexType>
+
+			<!-- Describes the bank account -->
+			<xs:complexType name="BankAccount">
+				<xs:all>
+					<!-- The name of the bank -->
+					<xs:element name="BankName" type="tax:StringInputType"
+						minOccurs="0" />
+					<!-- The account number -->
+					<xs:element name="BankAccountNumber" type="tax:StringInputType"
+						minOccurs="0" />
+				</xs:all>
+			</xs:complexType>
+
+
+  <!-- Describes the taxpayer -->
+			<xs:complexType name="TaxpayerInfo">
+				<xs:sequence>
+					<xs:choice minOccurs="0">
+						<!-- Represents the TIN -->
+						<xs:element name="TIN" type="tax:TinType" />
+						<!-- Represents the passport information -->
+					</xs:choice>
+          <xs:element name="Passport" type="tax:PassportType"  minOccurs="0"/>
+          <xs:element name="PIDType" type="tax:PIDType"  minOccurs="0"/>
+          <!-- Represents the name of the company or person -->
+					<xs:element name="Name" type="tax:CompanyNameType" minOccurs="0"/>
+          <!-- Represents the Supplayer name and surname -->
+          <xs:element name="SupplierNameSurname" type="tax:SupplierNameSurnameType" minOccurs="0"/>
+           <!-- Represents country -->
+          <xs:element name="Country" type="tax:StringInputType" minOccurs="0"/>
+					<!-- Represents the address -->
+					<xs:element name="Address" type="tax:StringInputType"  minOccurs="0"/>
+					<!-- Represents the bank account information -->
+					<xs:element name="BankAccount" type="tax:BankAccount" minOccurs="0" />
+					<!-- Additional data on taxpayer -->
+					<xs:element name="AdditionalData" type="tax:StringInputType" minOccurs="0" />
+					<xs:element name="OrganizationalType" type="tax:StringInputType" minOccurs="0" />
+          <xs:element name="CredentialsNumber" type="tax:StringInputType" minOccurs="0" />
+          <xs:element name="ContractInfo" type="tax:ContractInfo" minOccurs="0" />
+          <xs:element name="TinNotRequired" type="xs:boolean" minOccurs="0" />
+					<xs:element name="PrincipalTinNotRequired" type="xs:boolean" minOccurs="0" />
+          <xs:element name="IsNatural" type="xs:boolean" minOccurs="0" />
+          <xs:element name="PSNOrAbsence" type="tax:PSNOrAbsenceType" minOccurs="0" />
+				</xs:sequence>
+			</xs:complexType>
+
+			<xs:complexType name="Mediator">
+				<xs:all>
+					<xs:element name="Name" type="tax:StringInputType"
+						minOccurs="0" />
+					<xs:element name="LicenseNumber" type="tax:StringInputType"
+						minOccurs="0" />
+					<xs:element name="LicenseDate" type="xs:date" minOccurs="0" />
+				</xs:all>
+			</xs:complexType>
+
+			<xs:complexType name="SupplierInfo">
+				<xs:all>
+					<xs:element name="VATNumber" type="tax:VATNumberType" minOccurs="0" />
+					<xs:element name="Taxpayer" type="tax:TaxpayerInfo" />
+					<xs:element name="SupplyLocation" type="tax:StringInputType1" minOccurs="0" />
+					<xs:element name="FactualSupplierAddress" type="tax:StringInputType1" minOccurs="0" />
+          <xs:element name="SourceIsCar" type="xs:boolean" minOccurs="0" />
+          <xs:element name="SourceCarInfo" type="tax:CarInfo" minOccurs="0" />
+				</xs:all>
+			</xs:complexType>
+
+      <xs:complexType name="OnBehalfOfSupplierInfo">
+				<xs:all>
+					<xs:element name="VATNumber" type="tax:VATNumberType"
+						minOccurs="0" />
+					<xs:element name="Taxpayer" type="tax:TaxpayerInfo" />
+				</xs:all>
+			</xs:complexType>
+
+
+			<xs:complexType name="BuyerInfo">
+				<xs:all>
+					<xs:element name="VATNumber" type="tax:VATNumberType" minOccurs="0" />
+					<xs:element name="Taxpayer" type="tax:TaxpayerInfo" />
+					<xs:element name="BuyerEmail" type="tax:StringInputType" minOccurs="0"/>
+					<xs:element name="Mediator" type="tax:Mediator" minOccurs="0" />
+					<xs:element name="DeliveryMethod" type="tax:StringInputType" minOccurs="0" />
+					<xs:element name="DeliveryLocation" type="tax:StringInputType1" minOccurs="0" />
+					<xs:element name="BuyerResidenceAddress" type="tax:StringInputType" minOccurs="0" />
+					<xs:element name="FactualBuyerAddress" type="tax:StringInputType1" minOccurs="0" />
+          <xs:element name="IsCitizenArmenia" type="xs:boolean" minOccurs="0" />
+          <xs:element name="InsuringEmployer" type="xs:boolean" minOccurs="0" />
+          <xs:element name="SocialCostPerson" type="tax:SocialCostPerson" minOccurs="0"/>
+				</xs:all>
+			</xs:complexType>
+
+      <xs:complexType name="SocialCostPerson">
+        <xs:all>
+          <xs:element name="CostType" type="tax:SocialCostType" minOccurs="0"/>
+          <xs:element name="PSNOrAbsence" type="tax:PSNOrAbsenceType" minOccurs="0" />
+          <xs:element name="FullName" type="tax:StringInputType" minOccurs="0"/>
+          <xs:element name="Identity" type="tax:IdentityType" minOccurs="0"/>
+          <xs:element name="SerialNumber" type="tax:StringInputType" minOccurs="0"/>
+        </xs:all>
+      </xs:complexType>
+
+			<!-- Nkaragrum e vacharvats apranq@ ir harkerov -->
+			<xs:complexType name="Good">
+				<xs:all>
+          <xs:element name="GoodId" type="tax:GoodId" minOccurs="0"/>
+          <xs:element name="GoodParentId" type="tax:GoodId" minOccurs="0"/>
+          <xs:element name="Description" type="tax:GoodName" minOccurs="0"/>
+          <xs:element name="ClassifierCode" type="tax:ClassifierCode" minOccurs="0"/>
+          <xs:element name="Classification" type="tax:Classification" minOccurs="0"/>
+					<xs:element name="Unit" type="tax:Unit" minOccurs="0" />
+					<xs:element name="Volume" type="tax:Double1" minOccurs="0" />
+					<xs:element name="Amount" type="tax:Double4" minOccurs="0" />
+					<xs:element name="PricePerUnit" type="tax:Double5" minOccurs="0" />
+					<xs:element name="Price" type="tax:Double" minOccurs="0"/>
+					<xs:element name="Discount" type="tax:Double6"  minOccurs="0"/>
+          <xs:element name="TarePrice" type="tax:Double" minOccurs="0"/>
+          <xs:element name="ExciseTax" type="tax:Double" minOccurs="0"/>
+					<xs:element name="ExciseRate" type="tax:Double" minOccurs="0" />
+					<xs:element name="Excise" type="tax:Double1" minOccurs="0" />
+					<xs:element name="VATRate" type="tax:Double" minOccurs="0" />
+					<xs:element name="VAT" type="tax:Double" minOccurs="0" />
+          <xs:element name="DealType" type="tax:DealType" minOccurs="0" />
+					<xs:element name="EnvironmentalFee" type="tax:Double" minOccurs="0"/>
+					<xs:element name="IsVatEditableInAdjustingAccount" type="xs:boolean" minOccurs="0"/>
+					<xs:element name="TotalPrice" type="tax:Double" minOccurs="0" />
+          <xs:element name="GoodTraceableInfo" type="tax:GoodTraceable" minOccurs="0" />
+				</xs:all>
+			</xs:complexType>
+
+      <xs:complexType name="GoodTraceable">
+        <xs:all>
+          <xs:element name="PreviousDocumentNumber" type="tax:PreviousDocumentNumber" minOccurs="0"/>
+          <xs:element name="PreviousDocumentType" type="tax:PreviousDocumentType" minOccurs="0"/>
+          <xs:element name="SeqNoByPreviousDoc" type="tax:SeqNoByPreviousDoc" minOccurs="0"/>
+          <xs:element name="ProductFEACNCode" type="tax:ProductFEACNCode" minOccurs="0"/>
+          <xs:element name="QuantityByFEACN" type="tax:QuantityByFEACN" minOccurs="0"/>
+          <xs:element name="UnitByFEACNCode" type="tax:UnitByFEACNCode" minOccurs="0"/>
+        </xs:all>
+      </xs:complexType>
+
+			<xs:complexType name="Total">
+				<xs:all>
+					<xs:element name="Price" type="tax:Double" minOccurs="0" />
+					<xs:element name="Excise" type="tax:Double" minOccurs="0" />
+					<xs:element name="VAT" type="tax:Double" minOccurs="0" />
+					<xs:element name="TotalPrice" type="tax:Double" minOccurs="0" />
+					<xs:element name="TotalEnvironmentalFee" type="tax:Double" minOccurs="0" />
+					<xs:element name="TotalTarePrice" type="tax:Double" minOccurs="0" />
+				</xs:all>
+			</xs:complexType>
+
+			<!--
+				Parunakum e harkayin hashvov vacharvats bolor apranqner@, dranc
+				@ndhanur arzheq@ harkerov
+			-->
+			<xs:complexType name="GoodsInfo">
+				<xs:sequence>
+					<xs:element name="Good" type="tax:Good" minOccurs="0"
+						maxOccurs="unbounded" />
+					<xs:element name="Total" type="tax:Total" minOccurs="0"/>
+				</xs:sequence>
+			</xs:complexType>
+
+			<xs:complexType name="Invoice">
+				<xs:complexContent>
+					<xs:extension base="tax:SignableData">
+						<xs:all>
+							<xs:element name="User" type="xs:string" minOccurs="0"/>
+							<xs:element name="Type" type="tax:InvoiceTypeType" />
+              <xs:element name="Traceable" type="xs:boolean" minOccurs="0"/>
+							<xs:element name="GeneralInfo" type="tax:GeneralInfo" minOccurs="0"/>
+							<xs:element name="SupplierInfo" type="tax:SupplierInfo" />
+              <xs:element name="OnBehalfOfSupplierInfo" type="tax:OnBehalfOfSupplierInfo" minOccurs="0"/>
+							<xs:element name="BuyerInfo" type="tax:BuyerInfo" minOccurs="0"/>
+							<xs:element name="GoodsInfo" type="tax:GoodsInfo" minOccurs="0" />
+						</xs:all>
+						<xs:attribute name="Version" type="xs:string" use="required" />
+					</xs:extension>
+				</xs:complexContent>
+			</xs:complexType>
+
+			<xs:complexType name="InvoiceBatch">
+				<xs:complexContent>
+					<xs:extension base="tax:SignableData">
+						<xs:sequence>
+							<xs:element name="Invoice" type="tax:Invoice"
+								minOccurs="1" maxOccurs="1000" />
+						</xs:sequence>
+					</xs:extension>
+				</xs:complexContent>
+			</xs:complexType>
+
+			<xs:complexType name="InvalidationBatch">
+				<xs:complexContent>
+					<xs:extension base="tax:SignableData">
+						<xs:sequence>
+							<xs:element name="Entry" type="tax:InvalidationBatchEntry"
+								minOccurs="1" maxOccurs="1000" />
+						</xs:sequence>
+					</xs:extension>
+				</xs:complexContent>
+			</xs:complexType>
+
+			<xs:complexType name="InvalidationRequest">
+				<xs:complexContent>
+					<xs:extension base="tax:SignableData">
+						<xs:all>
+							<xs:element name="InvoiceNumber" type="tax:InvoiceNumber" />
+							<xs:element name="TIN" type="tax:TinType" />
+							<xs:element name="Name" type="tax:CompanyNameType" />
+							<xs:element name="Reason" type="tax:StringInputType" minOccurs="0"/>
+						</xs:all>
+					</xs:extension>
+				</xs:complexContent>
+			</xs:complexType>
+
+			<xs:complexType name="Signature">
+				<xs:all>
+					<xs:element name="SignatureType" type="xs:string"  minOccurs="0"  />
+					<xs:element name="SignatureValue" type="xs:base64Binary" minOccurs="0" />
+				</xs:all>
+			</xs:complexType>
+
+			<xs:complexType name="InvoiceMetadata">
+				<xs:all>
+					<xs:element name="SubmissionDate" type="xs:string"
+						minOccurs="0" />
+					<xs:element name="CoSignDate" type="xs:string"
+						minOccurs="0" />
+					<xs:element name="BatchInfo" type="tax:BatchInfo"
+						minOccurs="0" />
+					<xs:element name="InvoiceDocStatus" type="xs:int"
+                        minOccurs="0"/>
+				</xs:all>
+			</xs:complexType>
+
+			<xs:complexType name="BatchInfo">
+				<xs:sequence>
+					<xs:element name="BatchId" type="xs:int" />
+				</xs:sequence>
+			</xs:complexType>
+
+			<xs:complexType name="SignedData">
+				<xs:sequence>
+					<xs:element name="Data" type="tax:Data" />
+					<xs:element name="Signature" type="tax:Signature"
+						minOccurs="1" maxOccurs="2" />
+					<xs:element name="InvoiceMetadata" type="tax:InvoiceMetadata"
+						minOccurs="0" />
+				</xs:sequence>
+			</xs:complexType>
+
+			<xs:complexType name="ExportedData">
+				<xs:choice>
+					<xs:element name="SignedData" type="tax:SignedData"
+						minOccurs="0" maxOccurs="unbounded" />
+					<xs:element name="Invoice" type="tax:Invoice" minOccurs="0"
+						maxOccurs="unbounded" />
+				</xs:choice>
+			</xs:complexType>
+
+			<xs:complexType name="SignableData" />
+
+			<xs:complexType name="Data">
+				<xs:sequence>
+					<xs:element name="SignableData" type="tax:SignableData" />
+				</xs:sequence>
+				<!--
+					<choice> <element name="Invoice" type="tax:Invoice" /> <element
+					name="InvoiceBatch" type="tax:InvoiceBatch" /> <element
+					name="InvalidationRequest" type="tax:InvalidationRequest" />
+					</choice>
+				-->
+			</xs:complexType>
+
+
+			<xs:element name="SignedData" type="tax:SignedData" />
+
+			<xs:element name="ExportedData" type="tax:ExportedData" />
+			<xs:element name="Data" type="tax:Data" />
+
+</xs:schema>
