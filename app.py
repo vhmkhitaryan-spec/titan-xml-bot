@@ -453,34 +453,82 @@ def send_token_mail():
 # 8. ՊԵԿ e-invoicing API
 # ---------------------------------------------------------------------------
 class Progress:
-    """One Telegram message per invoice that is edited as each step completes,
-    so the whole path of the invoice is visible without flooding the chat."""
+    """ONE Telegram message per invoice, a reply to the forwarded invoice.
+    It starts as a document message (a small placeholder file) whose caption
+    is the step log; every step edits the caption, and at the end the
+    placeholder is replaced by the draft's PDF IN THE SAME MESSAGE, so the
+    PDF always stays right under its own invoice."""
+
+    CAPTION_LIMIT = 1000  # Telegram allows 1024 UTF-16 units; emoji count double
 
     def __init__(self, chat_id, title, reply_to=None):
         self.chat_id, self.lines, self.message_id = chat_id, [title], None
-        self.reply_to = reply_to
-        self._push()
+        self.reply_to, self.summary = reply_to, None
+        self._send_placeholder()
+
+    def _caption(self):
+        head, steps = self.lines[:1], self.lines[1:]
+        tail = ["", self.summary] if self.summary else []
+        while True:
+            text = "\n".join(head + steps + tail)
+            if len(text) <= self.CAPTION_LIMIT or not steps:
+                return text[: self.CAPTION_LIMIT]
+            steps = ["\u2026"] + steps[2:] if steps[0] == "\u2026" else ["\u2026"] + steps[1:]
+
+    def _send_placeholder(self):
+        data = {"chat_id": self.chat_id, "caption": self._caption()}
+        if self.reply_to:
+            data["reply_parameters"] = json.dumps({"message_id": self.reply_to,
+                                                   "allow_sending_without_reply": True})
+        try:
+            r = requests.post(
+                f"{TELEGRAM_API}/sendDocument",
+                data=data,
+                files={"document": ("մշակվում-է.txt", "Titan XML Bot՝ մշակվում է…".encode("utf-8"), "text/plain")},
+                timeout=30,
+            ).json()
+            self.message_id = (r.get("result") or {}).get("message_id")
+        except Exception:
+            pass
 
     def _push(self):
-        text = "\n".join(self.lines)[-4000:]
+        if self.message_id is None:
+            return
         try:
-            if self.message_id is None:
-                body = {"chat_id": self.chat_id, "text": text}
-                if self.reply_to:
-                    body["reply_parameters"] = {"message_id": self.reply_to,
-                                                "allow_sending_without_reply": True}
-                r = requests.post(f"{TELEGRAM_API}/sendMessage", json=body, timeout=20).json()
-                self.message_id = (r.get("result") or {}).get("message_id")
-            else:
-                requests.post(f"{TELEGRAM_API}/editMessageText",
-                              json={"chat_id": self.chat_id, "message_id": self.message_id, "text": text},
-                              timeout=20)
+            requests.post(f"{TELEGRAM_API}/editMessageCaption",
+                          json={"chat_id": self.chat_id, "message_id": self.message_id,
+                                "caption": self._caption()},
+                          timeout=20)
         except Exception:
             pass
 
     def step(self, text):
         self.lines.append(f"{datetime.datetime.now(YEREVAN):%H:%M:%S}  {text}")
         self._push()
+
+    def _replace_file(self, filename, content, mime):
+        if self.message_id is None:
+            return False
+        media = {"type": "document", "media": "attach://file", "caption": self._caption()}
+        try:
+            r = requests.post(
+                f"{TELEGRAM_API}/editMessageMedia",
+                data={"chat_id": self.chat_id, "message_id": self.message_id, "media": json.dumps(media)},
+                files={"file": (filename, content, mime)},
+                timeout=60,
+            ).json()
+            return bool(r.get("ok"))
+        except Exception:
+            return False
+
+    def finish_pdf(self, filename, pdf, summary):
+        """Same message: placeholder file -> the draft PDF, log + summary as caption."""
+        self.summary = summary
+        return self._replace_file(filename, pdf, "application/pdf")
+
+    def finish_without_pdf(self):
+        """Same message: placeholder file -> the log itself, so no 'processing' file is left."""
+        self._replace_file("log.txt", "\n".join(self.lines).encode("utf-8"), "text/plain")
 
 
 class _NoProgress:
@@ -1005,6 +1053,7 @@ def worker_loop():
             except (Skip, ValueError) as e:
                 log.step(f"\u274c {e}")
                 log.step("Սևագիր չի ստեղծվել")
+                log.finish_without_pdf()
                 _confirm(uid)
                 continue
             except Exception as e:
@@ -1026,11 +1075,13 @@ def worker_loop():
             try:
                 pdf = pek_draft_pdf(usable_token() or STATE["token"], doc_id)
                 log.step(f"\u2714 PDF-ը ստացվեց ՊԵԿ-ից ({max(1, len(pdf) // 1024)} ԿԲ)")
-                tg_send_document(chat_id, f"sevagir-{p['date']}.pdf", pdf, caption=summary,
-                                 reply_to=msg.get("message_id"))
+                if not log.finish_pdf(f"sevagir-{p['date']}.pdf", pdf, summary):
+                    # Editing failed (very rare): fall back to a separate reply.
+                    tg_send_document(chat_id, f"sevagir-{p['date']}.pdf", pdf, caption=summary,
+                                     reply_to=msg.get("message_id"))
             except Exception as e:
-                # The log already says the draft exists; no second message.
                 log.step(f"\u26a0 PDF-ը չստացվեց՝ {e}. Սևագիրը կա ՊԵԿ-ում, PDF-ը վերցրու կայքից")
+                log.finish_without_pdf()
 
 
 # ---------------------------------------------------------------------------
