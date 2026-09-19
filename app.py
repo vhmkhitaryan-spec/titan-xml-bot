@@ -456,16 +456,20 @@ class Progress:
     """One Telegram message per invoice that is edited as each step completes,
     so the whole path of the invoice is visible without flooding the chat."""
 
-    def __init__(self, chat_id, title):
+    def __init__(self, chat_id, title, reply_to=None):
         self.chat_id, self.lines, self.message_id = chat_id, [title], None
+        self.reply_to = reply_to
         self._push()
 
     def _push(self):
         text = "\n".join(self.lines)[-4000:]
         try:
             if self.message_id is None:
-                r = requests.post(f"{TELEGRAM_API}/sendMessage",
-                                  json={"chat_id": self.chat_id, "text": text}, timeout=20).json()
+                body = {"chat_id": self.chat_id, "text": text}
+                if self.reply_to:
+                    body["reply_parameters"] = {"message_id": self.reply_to,
+                                                "allow_sending_without_reply": True}
+                r = requests.post(f"{TELEGRAM_API}/sendMessage", json=body, timeout=20).json()
                 self.message_id = (r.get("result") or {}).get("message_id")
             else:
                 requests.post(f"{TELEGRAM_API}/editMessageText",
@@ -748,10 +752,12 @@ def tg_send_message(chat_id, text):
         pass
 
 
-def tg_send_document(chat_id, filename, content_bytes, mime="application/pdf", caption=None):
+def tg_send_document(chat_id, filename, content_bytes, mime="application/pdf", caption=None, reply_to=None):
     data = {"chat_id": chat_id}
     if caption:
         data["caption"] = caption
+    if reply_to:
+        data["reply_parameters"] = json.dumps({"message_id": reply_to, "allow_sending_without_reply": True})
     requests.post(
         f"{TELEGRAM_API}/sendDocument",
         data=data,
@@ -985,7 +991,7 @@ def worker_loop():
                 continue
 
             chat_id = msg["chat"]["id"]
-            log = Progress(chat_id, "\U0001f4e5 Հաշիվը ստացվեց, մշակում եմ")
+            log = Progress(chat_id, "\U0001f4e5 Հաշիվը ստացվեց, մշակում եմ", reply_to=msg.get("message_id"))
             try:
                 prepared = prepare(text, log)
                 if not prepared:
@@ -1020,7 +1026,8 @@ def worker_loop():
             try:
                 pdf = pek_draft_pdf(usable_token() or STATE["token"], doc_id)
                 log.step(f"\u2714 PDF-ը ստացվեց ՊԵԿ-ից ({max(1, len(pdf) // 1024)} ԿԲ)")
-                tg_send_document(chat_id, f"sevagir-{p['date']}.pdf", pdf, caption=summary)
+                tg_send_document(chat_id, f"sevagir-{p['date']}.pdf", pdf, caption=summary,
+                                 reply_to=msg.get("message_id"))
             except Exception as e:
                 # The log already says the draft exists; no second message.
                 log.step(f"\u26a0 PDF-ը չստացվեց՝ {e}. Սևագիրը կա ՊԵԿ-ում, PDF-ը վերցրու կայքից")
