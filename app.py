@@ -707,26 +707,30 @@ def pek_create_draft(token, parsed, constants, buyer_info, goods, doc_id, retry=
 
 
 def pek_draft_pdf(token, doc_id):
-    res = pek_call(token, "goods/goods-pdf-generate", {"id": doc_id}) or {}
-    url = res.get("url") if isinstance(res, dict) else (res if isinstance(res, str) else None)
-    if not url:
-        raise PekTransient(f"PDF-ի հղում չստացվեց՝ {str(res)[:200]}")
-    root = "https://e-invoicing.taxservice.am"
-    if url.startswith("http"):
-        candidates = [url]
-    else:
-        path = url if url.startswith("/") else "/" + url
-        # The bare path is the web app's route (returns its HTML page); the
-        # file itself is served under /api. Try both, keep the one that is a PDF.
-        candidates = [root + "/api" + path, root + path] if not path.startswith("/api/") else [root + path]
-    tried = []
-    for u in candidates:
-        r = requests.get(u, cookies={"jwt-auth-token": token},
-                         headers={"accept": "application/pdf,*/*"}, timeout=60)
-        if r.status_code == 200 and r.content.startswith(b"%PDF"):
-            return r.content
-        tried.append(f"{u} → HTTP {r.status_code}, {r.headers.get('content-type', '?')}, {len(r.content)} բ")
-    raise PekTransient("PDF չստացվեց. ՊԵԿ-ի հղումը՝ " + url + "; փորձեր՝ " + "; ".join(tried))
+    """The ՊԵԿ web app downloads PDFs with POST /api/dispatcher/pdf-export
+    {ids, sortCol, sortAsc}; the response body is the PDF itself.
+    (goods-pdf-generate only returns a path on ՊԵԿ's own disk.)"""
+    try:
+        r = requests.post(
+            f"{PEK_API}/dispatcher/pdf-export",
+            json={"payload": {"ids": [doc_id], "sortCol": "createdAt", "sortAsc": False}},
+            headers={"accept": "application/pdf,application/json,*/*"},
+            cookies={"jwt-auth-token": token},
+            timeout=90,
+        )
+    except requests.RequestException as e:
+        raise PekTransient(f"PDF՝ {type(e).__name__}")
+    if r.status_code == 200 and r.content.startswith(b"%PDF"):
+        return r.content
+    detail = ""
+    if "json" in r.headers.get("content-type", ""):
+        try:
+            f = r.json().get("failure") or {}
+            detail = f"{f.get('code', '')}: {f.get('message', '')}"
+        except ValueError:
+            pass
+    raise PekTransient(f"pdf-export → HTTP {r.status_code}, {r.headers.get('content-type', '?')}, "
+                       f"{len(r.content)} բ {detail}".strip())
 
 
 # ---------------------------------------------------------------------------
@@ -1018,8 +1022,8 @@ def worker_loop():
                 log.step(f"\u2714 PDF-ը ստացվեց ՊԵԿ-ից ({max(1, len(pdf) // 1024)} ԿԲ)")
                 tg_send_document(chat_id, f"sevagir-{p['date']}.pdf", pdf, caption=summary)
             except Exception as e:
-                log.step(f"\u26a0 PDF-ը չստացվեց՝ {e}")
-                tg_send_message(chat_id, summary + f"\n(PDF-ը չստացվեց՝ {e})")
+                # The log already says the draft exists; no second message.
+                log.step(f"\u26a0 PDF-ը չստացվեց՝ {e}. Սևագիրը կա ՊԵԿ-ում, PDF-ը վերցրու կայքից")
 
 
 # ---------------------------------------------------------------------------
