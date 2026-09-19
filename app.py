@@ -869,8 +869,9 @@ def prepare(text, log=_NoProgress()):
 WORKER = {"offset": None, "waiting_chat": None, "queue_len": 0, "handled_cmds": set()}
 
 
-def _is_forward(msg):
-    return any(k in msg for k in ("forward_origin", "forward_from", "forward_date"))
+def _is_invoice(msg):
+    """Any message (forwarded or typed) whose first line is the invoice header."""
+    return (msg.get("text") or "").split("\n")[0].strip() == INVOICE_HEADER
 
 
 def _confirm(update_id):
@@ -1034,7 +1035,7 @@ def worker_loop():
                 _confirm(uid)
                 continue
 
-            if not _is_forward(msg):
+            if not _is_invoice(msg):
                 _confirm(uid)
                 continue
 
@@ -1047,7 +1048,7 @@ def worker_loop():
                     continue
                 pending_after = sum(
                     1 for x in updates[idx + 1:]
-                    if _is_forward(x.get("message") or x.get("channel_post") or {})
+                    if _is_invoice(x.get("message") or x.get("channel_post") or {})
                 )
                 chat_id, doc_id = process_invoice(msg, prepared, pending_after, log)
             except (Skip, ValueError) as e:
