@@ -739,7 +739,13 @@ def build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id, number=
         "finalUse": False,
         "hasCodes": False,
         "traceable": False,
-        "supplierAdditionalInfo": f"№ {number}" if number else None,
+        # The invoice's own official schema (invoice.xsd) has an AdditionalData
+        # field in TWO places: GeneralInfo/AdditionalData (the "Հարկային հաշվի
+        # տվյալներ" section) and SupplierInfo/Taxpayer/AdditionalData (the
+        # supplier's own info block). "supplierAdditionalInfo" mapped to the
+        # latter, which put our invoice number in the wrong section; the
+        # unprefixed "additionalInfo" is the GeneralInfo-level one we want.
+        "additionalInfo": f"№ {number}" if number else None,
     }
     entity = {k: v for k, v in entity.items() if v is not None}
     return entity, items
@@ -876,7 +882,7 @@ def find_matching_drafts(token, prepared):
             and _close(it.get("total"), g["total_price"])
             for it, g in zip(items, goods)
         ):
-            matches.append((row["id"], (doc.get("supplierAdditionalInfo") or "").strip()))
+            matches.append((row["id"], (doc.get("additionalInfo") or "").strip()))
     return matches
 
 
@@ -1174,14 +1180,8 @@ def queue_call(payload):
     return res
 
 
-def _reference_message(number, action):
-    head = (CANCEL_HEADER if action == "cancel" else INVOICE_HEADER) + f" № {number}"
-    try:
-        r = requests.post(f"{TELEGRAM_API}/sendMessage",
-                          json={"chat_id": OUTPUT_CHAT_ID, "text": head}, timeout=20).json()
-        return (r.get("result") or {}).get("message_id")
-    except Exception:
-        return None
+def _invoice_head(number, action):
+    return (CANCEL_HEADER if action == "cancel" else INVOICE_HEADER) + f" № {number}"
 
 
 _REF = {}               # "number:action" -> (reference message id, Progress) for retries
@@ -1204,11 +1204,14 @@ def process_queue_sheet():
     for i, row in enumerate(rows):
         key = f"{row['number']}:{row['action']}"
         if key not in _REF:
-            ref_id = _reference_message(row["number"], row["action"])
-            title = ("\U0001f4e5 Չեղարկումը ստացվեց, մշակում եմ" if row["action"] == "cancel"
-                     else "\U0001f4e5 Հաշիվը ստացվեց, մշակում եմ")
-            _REF[key] = (ref_id, Progress(OUTPUT_CHAT_ID, title, reply_to=ref_id,
-                                          with_file=row["action"] != "cancel"))
+            status_line = ("\U0001f4e5 Չեղարկումը ստացվեց, մշակում եմ" if row["action"] == "cancel"
+                           else "\U0001f4e5 Հաշիվը ստացվեց, մշակում եմ")
+            # One message: the invoice header as its own first line, then the
+            # status log underneath — not a separate header message that a
+            # reply then quotes again (that showed the number twice).
+            title = f"{_invoice_head(row['number'], row['action'])}\n{status_line}"
+            log = Progress(OUTPUT_CHAT_ID, title, with_file=row["action"] != "cancel")
+            _REF[key] = (log.message_id, log)
         ref_id, log = _REF[key]
         fake_msg = {"chat": {"id": OUTPUT_CHAT_ID}, "message_id": ref_id}
         try:
