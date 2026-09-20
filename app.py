@@ -60,6 +60,12 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 MAIL_SUBJECT = "TITAN-TOKEN"
 
 PEK_API = "https://e-invoicing.taxservice.am/api"
+
+# Queue Sheet (dashboard -> Apps Script -> Google Sheet -> this bot)
+QUEUE_URL = os.environ.get("QUEUE_URL", "")          # Apps Script web app URL
+QUEUE_SECRET = os.environ.get("QUEUE_SECRET", "")
+OUTPUT_CHAT_ID = os.environ.get("OUTPUT_CHAT_ID", "")  # chat for reference messages
+QUEUE_POLL_EVERY = 15                                  # seconds
 XSD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "invoice.xsd")
 
 NS = "http://www.taxservice.am/tp3/invoice/definitions"
@@ -91,7 +97,7 @@ def parse_invoice_text(text):
     """Returns a dict {date, buyer, driver, products:[{name,qty,unit,gross_price}], total}
     or None if this text is not a (non-cancelled) invoice message."""
     lines = text.split("\n")
-    if not lines or lines[0].strip() != INVOICE_HEADER:
+    if not lines or not lines[0].strip().startswith(INVOICE_HEADER):
         return None
 
     idx = 1
@@ -670,7 +676,7 @@ def behalf_of(constants):
     return _PROCEDURE_TO_BEHALF[proc]
 
 
-def build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id):
+def build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id, number=None):
     """Maps our data onto the goods-create-draft model.
     Field choices marked (?) are best guesses from the package; the
     goods-validate-model step reports anything ՊԵԿ disagrees with."""
@@ -733,6 +739,7 @@ def build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id):
         "finalUse": False,
         "hasCodes": False,
         "traceable": False,
+        "supplierAdditionalInfo": f"№ {number}" if number else None,
     }
     entity = {k: v for k, v in entity.items() if v is not None}
     return entity, items
@@ -756,13 +763,14 @@ def pek_draft_exists(token, doc_id):
         return False
 
 
-def pek_create_draft(token, parsed, constants, buyer_info, goods, doc_id, retry=False, log=_NoProgress()):
+def pek_create_draft(token, parsed, constants, buyer_info, goods, doc_id, retry=False, log=_NoProgress(),
+                     number=None):
     # A retry after a network error may follow a create that actually succeeded:
     # the id is fixed per message, so check before creating it again.
     if retry and pek_draft_exists(token, doc_id):
         log.step("\u2714 Սևագիրը արդեն ստեղծված էր (նախորդ փորձից)")
         return doc_id
-    entity, items = build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id)
+    entity, items = build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id, number)
     log.step("\u2714 ՊԵԿ դասակարգիչ՝ բոլոր կոդերը գտնվեցին")
     tin = entity["supplierTin"]
 
@@ -868,7 +876,7 @@ def find_matching_drafts(token, prepared):
             and _close(it.get("total"), g["total_price"])
             for it, g in zip(items, goods)
         ):
-            matches.append(row["id"])
+            matches.append((row["id"], (doc.get("supplierAdditionalInfo") or "").strip()))
     return matches
 
 
@@ -922,6 +930,28 @@ def prepare(text, log=_NoProgress(), with_xml=True):
     if not parsed:
         return None  # e.g. a cancellation message
     log.step("\u2714 Տեքստը կարդացվեց")
+    return prepare_parsed(parsed, log, with_xml)
+
+
+def parsed_from_queue(data):
+    """Dashboard's structured data -> the same dict parse_invoice_text returns."""
+    try:
+        products = [{"name": str(i["name"]).strip(), "qty": float(i["qty"]), "unit": None,
+                     "gross_price": float(i["price"])} for i in data["items"]]
+        if not products:
+            raise ValueError
+        return {
+            "date": str(data["date"])[:10],
+            "buyer": str(data["buyer"]).strip(),
+            "driver": re.sub(r"\s*⚠️\s*$", "", str(data.get("driver") or "")).strip(),
+            "products": products,
+            "total": float(data["total"]),
+        }
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("Dashboard-ի տվյալները թերի են")
+
+
+def prepare_parsed(parsed, log=_NoProgress(), with_xml=True):
 
     wb = download_reference_workbook()
     constants = read_constants(wb["Constants"])
@@ -964,12 +994,12 @@ WORKER = {"offset": None, "waiting_chat": None, "queue_len": 0, "handled_cmds": 
 def _is_cancel(msg):
     """'❌ Չեղարկում' header (emoji variation selector tolerated)."""
     first = (msg.get("text") or "").split("\n")[0].strip().replace("\ufe0f", "")
-    return first == CANCEL_HEADER
+    return first.startswith(CANCEL_HEADER)
 
 
 def _is_invoice(msg):
     """Any message (forwarded or typed) whose first line is the invoice header."""
-    return (msg.get("text") or "").split("\n")[0].strip() == INVOICE_HEADER
+    return (msg.get("text") or "").split("\n")[0].strip().startswith(INVOICE_HEADER)
 
 
 def _confirm(update_id):
@@ -1000,6 +1030,9 @@ def status_text():
 
 def handle_command(msg):
     text = (msg.get("text") or "").strip()
+    if text.startswith("/chatid"):
+        tg_send_message(msg["chat"]["id"], f"chat id: {msg['chat']['id']}")
+        return True
     if text.startswith("/tokenstatus") or text.startswith("/status"):
         tg_send_message(msg["chat"]["id"], status_text())
         return True
@@ -1077,7 +1110,9 @@ def yield_commands():
 def process_invoice(msg, prepared, pending_after, log=_NoProgress()):
     chat_id = msg["chat"]["id"]
     parsed = prepared["parsed"]
-    retry = False
+    # Queue rows use a fixed draft id per number: always check first whether a
+    # previous run (before a restart) already created it.
+    retry = bool(prepared.get("number"))
     while True:
         token = usable_token()
         if not token:
@@ -1085,7 +1120,8 @@ def process_invoice(msg, prepared, pending_after, log=_NoProgress()):
             continue
         try:
             doc_id = pek_create_draft(token, parsed, prepared["constants"], prepared["buyer"],
-                                      prepared["goods"], prepared["doc_id"], retry=retry, log=log)
+                                      prepared["goods"], prepared["doc_id"], retry=retry, log=log,
+                                      number=prepared.get("number"))
         except PekTransient as e:
             log.step(f"\u26a0 ՊԵԿ-ը չպատասխանեց ({e}), կփորձեմ 1 րոպեից")
             retry = True
@@ -1112,7 +1148,7 @@ def process_cancel(msg, prepared, pending_after, log=_NoProgress()):
             if not matches:
                 return None
             log.step("\u2714 ՊԵԿ-ում գտնվեց համապատասխան սևագիր" + (f" ({len(matches)})" if len(matches) > 1 else ""))
-            pek_call(token, "goods/goods-remove-draft", {"id": matches[0]})
+            pek_call(token, "goods/goods-remove-draft", {"id": matches[0][0]})
             return matches[0]
         except PekTransient as e:
             log.step(f"\u26a0 ՊԵԿ-ը չպատասխանեց ({e}), կփորձեմ 1 րոպեից")
@@ -1125,6 +1161,115 @@ def process_cancel(msg, prepared, pending_after, log=_NoProgress()):
             raise Skip(f"ՊԵԿ-ը չեղարկումը չընդունեց՝ {e.code}: {e.message}")
 
 
+class QueueTemporary(Exception):
+    """Sheet row must stay NEW and be retried later (order is preserved)."""
+
+
+def queue_call(payload):
+    r = requests.post(QUEUE_URL, data=json.dumps(dict(payload, secret=QUEUE_SECRET)),
+                      headers={"Content-Type": "text/plain;charset=utf-8"}, timeout=30)
+    res = r.json()
+    if not res.get("ok"):
+        raise RuntimeError(res.get("error") or "queue error")
+    return res
+
+
+def _reference_message(number, action):
+    head = (CANCEL_HEADER if action == "cancel" else INVOICE_HEADER) + f" № {number}"
+    try:
+        r = requests.post(f"{TELEGRAM_API}/sendMessage",
+                          json={"chat_id": OUTPUT_CHAT_ID, "text": head}, timeout=20).json()
+        return (r.get("result") or {}).get("message_id")
+    except Exception:
+        return None
+
+
+_REF = {}               # "number:action" -> (reference message id, Progress) for retries
+_QUEUE_LAST = {"t": 0.0}
+
+
+def process_queue_sheet():
+    """Handles NEW rows of the queue Sheet strictly in order. A row is marked
+    DONE/ERROR only when finished; a temporary problem leaves it NEW and stops
+    here, so the next row is never processed before it."""
+    if not (QUEUE_URL and QUEUE_SECRET and OUTPUT_CHAT_ID):
+        return
+    if time.time() - _QUEUE_LAST["t"] < QUEUE_POLL_EVERY:
+        return
+    _QUEUE_LAST["t"] = time.time()
+    try:
+        rows = queue_call({"op": "pending"}).get("rows", [])
+    except Exception:
+        return
+    for i, row in enumerate(rows):
+        key = f"{row['number']}:{row['action']}"
+        if key not in _REF:
+            ref_id = _reference_message(row["number"], row["action"])
+            title = ("\U0001f4e5 Չեղարկումը ստացվեց, մշակում եմ" if row["action"] == "cancel"
+                     else "\U0001f4e5 Հաշիվը ստացվեց, մշակում եմ")
+            _REF[key] = (ref_id, Progress(OUTPUT_CHAT_ID, title, reply_to=ref_id,
+                                          with_file=row["action"] != "cancel"))
+        ref_id, log = _REF[key]
+        fake_msg = {"chat": {"id": OUTPUT_CHAT_ID}, "message_id": ref_id}
+        try:
+            status, note = handle_queue_row(row, fake_msg, log, pending_after=len(rows) - i - 1)
+        except QueueTemporary:
+            return
+        try:
+            queue_call({"op": "mark", "row": row["row"], "status": status, "note": note})
+        except Exception:
+            return          # stays NEW; retried next time (draft id check prevents doubles)
+        _REF.pop(key, None)
+
+
+def handle_queue_row(row, msg, log, pending_after):
+    try:
+        parsed = parsed_from_queue(row["data"])
+        log.step("\u2714 Տվյալները ստացվեցին dashboard-ից")
+        if row["action"] == "cancel":
+            prepared = prepare_parsed(parsed, log, with_xml=False)
+            removed = process_cancel(msg, prepared, pending_after, log)
+            if removed:
+                log.step("\u2714 Սևագիրը ջնջվեց ՊԵԿ-ից" + (f" (հաշիվ {removed[1]})" if removed[1] else ""))
+                return "DONE", f"removed {removed[0]}"
+            log.step("\u26a0\ufe0f Համապատասխան սևագիր չգտնվեց։ Եթե հաշիվն արդեն ստորագրված է, "
+                     "չեղարկիր այն ՊԵԿ-ի կայքում ձեռքով։")
+            return "DONE", "no matching draft"
+        prepared = prepare_parsed(parsed, log)
+        prepared["number"] = row["number"]
+        prepared["doc_id"] = _stable_doc_id(row["number"])
+        _, doc_id = process_invoice(msg, prepared, pending_after, log)
+    except (Skip, ValueError) as e:
+        log.step(f"\u274c {e}")
+        log.step("Սևագիր չի ստեղծվել" if row["action"] != "cancel" else "Սևագիրը չի ջնջվել")
+        log.finish_without_pdf()
+        return "ERROR", str(e)[:300]
+    except Exception as e:
+        log.step(f"\u26a0 Ժամանակավոր սխալ՝ {type(e).__name__}: {e}. Կփորձեմ ավելի ուշ")
+        raise QueueTemporary()
+    # Draft exists: mark DONE before the PDF so a restart can never create it twice.
+    try:
+        queue_call({"op": "mark", "row": row["row"], "status": "DONE", "note": f"draft {doc_id}"})
+    except Exception:
+        pass
+    try:
+        pdf = pek_draft_pdf(usable_token() or STATE["token"], doc_id)
+        log.step("\u2714 PDF-ը ստացվեց ՊԵԿ-ից")
+        name = f"sevagir-{prepared['parsed']['date']}-{row['number']}.pdf"
+        if not log.finish_pdf(name, pdf):
+            tg_send_document(OUTPUT_CHAT_ID, name, pdf, caption=log._caption(), reply_to=msg.get("message_id"))
+    except Exception as e:
+        log.step(f"\u26a0 PDF-ը չստացվեց՝ {e}. Սևագիրը կա ՊԵԿ-ում, PDF-ը վերցրու կայքից")
+        log.finish_without_pdf()
+    return "DONE", f"draft {doc_id}"
+
+
+def _stable_doc_id(number):
+    """Same queue number -> same ՊԵԿ draft id, so a retry after a restart finds
+    the draft it already created instead of making a second one."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"titan-invoice-{number}"))
+
+
 def worker_loop():
     # Switch Telegram from webhook to getUpdates. Pending updates are kept.
     try:
@@ -1134,7 +1279,8 @@ def worker_loop():
 
     while True:
         try:
-            params = {"timeout": 50, "allowed_updates": ["message", "channel_post"]}
+            process_queue_sheet()
+            params = {"timeout": 10 if QUEUE_URL else 50, "allowed_updates": ["message", "channel_post"]}
             if WORKER["offset"] is not None:
                 params["offset"] = WORKER["offset"]
             res = tg("getUpdates", **params)
@@ -1188,7 +1334,7 @@ def worker_loop():
                     time.sleep(60)
                     break
                 if removed:
-                    log.step("\u2714 Սևագիրը ջնջվեց ՊԵԿ-ից")
+                    log.step("\u2714 Սևագիրը ջնջվեց ՊԵԿ-ից" + (f" (հաշիվ {removed[1]})" if removed[1] else ""))
                 else:
                     log.step("\u26a0\ufe0f Համապատասխան սևագիր չգտնվեց։ Եթե հաշիվն արդեն ստորագրված է, "
                              "չեղարկիր այն ՊԵԿ-ի կայքում ձեռքով։")
