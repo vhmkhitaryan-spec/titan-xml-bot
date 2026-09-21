@@ -572,7 +572,7 @@ class PekTransient(Exception):
     """Network trouble / 5xx: retry later, the message stays in the queue."""
 
 
-def pek_call(token, path, payload, timeout=40):
+def pek_call(token, path, payload, timeout=90):
     try:
         r = requests.post(
             f"{PEK_API}/{path}",
@@ -582,11 +582,11 @@ def pek_call(token, path, payload, timeout=40):
             timeout=timeout,
         )
     except requests.RequestException as e:
-        raise PekTransient(type(e).__name__)
+        raise PekTransient(f"{path}՝ {type(e).__name__}")
     if r.status_code in (401, 403):
         raise PekError(str(r.status_code), "մուտքը մերժվեց", auth=True)
     if r.status_code >= 500:
-        raise PekTransient(f"HTTP {r.status_code}")
+        raise PekTransient(f"{path}՝ HTTP {r.status_code}")
     try:
         data = r.json()
     except ValueError:
@@ -1119,6 +1119,7 @@ def process_invoice(msg, prepared, pending_after, log=_NoProgress()):
     # Queue rows use a fixed draft id per number: always check first whether a
     # previous run (before a restart) already created it.
     retry = bool(prepared.get("number"))
+    failures = 0
     while True:
         token = usable_token()
         if not token:
@@ -1129,7 +1130,10 @@ def process_invoice(msg, prepared, pending_after, log=_NoProgress()):
                                       prepared["goods"], prepared["doc_id"], retry=retry, log=log,
                                       number=prepared.get("number"))
         except PekTransient as e:
+            failures += 1
             log.step(f"\u26a0 ՊԵԿ-ը չպատասխանեց ({e}), կփորձեմ 1 րոպեից")
+            if failures == 5:
+                log.step("\u26a0 ՊԵԿ-ի API-ն 5 անգամ անընդմեջ չի պատասխանում. սպասում եմ, հերթը կանգնած է")
             retry = True
             time.sleep(60)
             continue
