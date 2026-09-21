@@ -1222,10 +1222,13 @@ def queue_call(payload):
 
 
 def _invoice_head(number, action):
-    return (CANCEL_HEADER if action == "cancel" else INVOICE_HEADER) + f" № {number}"
+    # Cancellations carry no number.
+    if action == "cancel":
+        return CANCEL_HEADER
+    return INVOICE_HEADER + f" № {number}"
 
 
-_REF = {}               # "number:action" -> (reference message id, Progress) for retries
+_REF = {}               # row identity -> (reference message id, Progress) for retries
 _QUEUE_LAST = {"t": 0.0}
 
 
@@ -1243,7 +1246,7 @@ def process_queue_sheet():
     except Exception:
         return
     for i, row in enumerate(rows):
-        key = f"{row['number']}:{row['action']}"
+        key = f"{row.get('received_at')}:{row['action']}:{row['row']}"
         if key not in _REF:
             status_line = ("\U0001f4e5 Չեղարկումը ստացվեց, մշակում եմ" if row["action"] == "cancel"
                            else "\U0001f4e5 Հաշիվը ստացվեց, մշակում եմ")
