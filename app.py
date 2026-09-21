@@ -1221,6 +1221,22 @@ def queue_call(payload):
     return res
 
 
+def release_number(info, log):
+    """After a successful cancellation: tell the queue Sheet that the cancelled
+    invoice's number (from the draft's "№ N") is free, so the next invoice gets it."""
+    m = re.search(r"(\d+)", info or "")
+    if not m or not QUEUE_URL:
+        return
+    try:
+        res = queue_call({"op": "release", "number": int(m.group(1))})
+        if res.get("released"):
+            log.step(f"\u2714 № {m.group(1)}-ը ազատվեց համարակալումից")
+        else:
+            log.step(f"\u26a0 № {m.group(1)}-ը Sheet-ում չգտնվեց, համարակալումը չի փոխվել")
+    except Exception as e:
+        log.step(f"\u26a0 № {m.group(1)}-ը չազատվեց ({e}). Sheet-ում տողի կարգավիճակը դարձրու CANCELLED ձեռքով")
+
+
 def _invoice_head(number, action):
     # Cancellations carry no number.
     if action == "cancel":
@@ -1279,6 +1295,7 @@ def handle_queue_row(row, msg, log, pending_after):
             removed = process_cancel(msg, prepared, pending_after, log)
             if removed:
                 log.step("\u2714 Սևագիրը ջնջվեց ՊԵԿ-ից" + (f" (հաշիվ {removed[1]})" if removed[1] else ""))
+                release_number(removed[1], log)
                 return "DONE", f"removed {removed[0]}"
             log.step("\u26a0\ufe0f Համապատասխան սևագիր չգտնվեց։ Եթե հաշիվն արդեն ստորագրված է, "
                      "չեղարկիր այն ՊԵԿ-ի կայքում ձեռքով։")
@@ -1384,6 +1401,7 @@ def worker_loop():
                     break
                 if removed:
                     log.step("\u2714 Սևագիրը ջնջվեց ՊԵԿ-ից" + (f" (հաշիվ {removed[1]})" if removed[1] else ""))
+                    release_number(removed[1], log)
                 else:
                     log.step("\u26a0\ufe0f Համապատասխան սևագիր չգտնվեց։ Եթե հաշիվն արդեն ստորագրված է, "
                              "չեղարկիր այն ՊԵԿ-ի կայքում ձեռքով։")
