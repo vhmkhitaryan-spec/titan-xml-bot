@@ -64,7 +64,9 @@ PEK_API = "https://e-invoicing.taxservice.am/api"
 # Queue Sheet (dashboard -> Apps Script -> Google Sheet -> this bot)
 QUEUE_URL = os.environ.get("QUEUE_URL", "")          # Apps Script web app URL
 QUEUE_SECRET = os.environ.get("QUEUE_SECRET", "")
-OUTPUT_CHAT_ID = os.environ.get("OUTPUT_CHAT_ID", "")  # chat for reference messages
+# Chat(s) for the invoice messages; several chats: comma-separated ids.
+OUTPUT_CHAT_IDS = [c.strip() for c in os.environ.get("OUTPUT_CHAT_ID", "").split(",") if c.strip()]
+OUTPUT_CHAT_ID = OUTPUT_CHAT_IDS[0] if OUTPUT_CHAT_IDS else ""
 QUEUE_POLL_EVERY = 15                                  # seconds
 XSD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "invoice.xsd")
 
@@ -555,6 +557,32 @@ class Progress:
         if not self.with_file:
             return
         self._replace_file("log.txt", "\n".join(self.lines).encode("utf-8"), "text/plain")
+
+
+class MultiProgress:
+    """The same invoice message (log + PDF) kept in several chats at once."""
+
+    def __init__(self, progresses):
+        self.items = progresses
+        self.message_id = progresses[0].message_id
+
+    def step(self, text):
+        for p in self.items:
+            p.step(text)
+
+    def _caption(self):
+        return self.items[0]._caption()
+
+    def finish_pdf(self, filename, pdf):
+        for p in self.items:
+            if not p.finish_pdf(filename, pdf):
+                # editing failed in this chat (rare): send the PDF there as a reply
+                tg_send_document(p.chat_id, filename, pdf, caption=p._caption(), reply_to=p.message_id)
+        return True
+
+    def finish_without_pdf(self):
+        for p in self.items:
+            p.finish_without_pdf()
 
 
 class _NoProgress:
@@ -1214,7 +1242,8 @@ def process_queue_sheet():
             # status log underneath — not a separate header message that a
             # reply then quotes again (that showed the number twice).
             title = f"{_invoice_head(row['number'], row['action'])}\n{status_line}"
-            log = Progress(OUTPUT_CHAT_ID, title, with_file=row["action"] != "cancel")
+            log = MultiProgress([Progress(cid, title, with_file=row["action"] != "cancel")
+                                 for cid in OUTPUT_CHAT_IDS])
             _REF[key] = (log.message_id, log)
         ref_id, log = _REF[key]
         fake_msg = {"chat": {"id": OUTPUT_CHAT_ID}, "message_id": ref_id}
