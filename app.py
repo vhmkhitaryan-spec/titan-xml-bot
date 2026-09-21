@@ -1282,7 +1282,7 @@ def handle_queue_row(row, msg, log, pending_after):
             return "DONE", "no matching draft"
         prepared = prepare_parsed(parsed, log)
         prepared["number"] = row["number"]
-        prepared["doc_id"] = _stable_doc_id(row["number"])
+        prepared["doc_id"] = _stable_doc_id(row["number"], row.get("received_at"))
         _, doc_id = process_invoice(msg, prepared, pending_after, log)
     except (Skip, ValueError) as e:
         log.step(f"\u274c {e}")
@@ -1309,10 +1309,11 @@ def handle_queue_row(row, msg, log, pending_after):
     return "DONE", f"draft {doc_id}"
 
 
-def _stable_doc_id(number):
-    """Same queue number -> same ՊԵԿ draft id, so a retry after a restart finds
-    the draft it already created instead of making a second one."""
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"titan-invoice-{number}"))
+def _stable_doc_id(number, received_at=None):
+    """Same queue row -> same ՊԵԿ draft id, so a retry after a restart finds the
+    draft it already created instead of making a second one. The row's creation
+    time is part of it, so numbers reused after the Sheet is reset never clash."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"titan-invoice-{number}-{received_at or ''}"))
 
 
 def worker_loop():
