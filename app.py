@@ -804,6 +804,15 @@ def pek_create_draft(token, parsed, constants, buyer_info, goods, doc_id, retry=
     if retry and pek_draft_exists(token, doc_id):
         log.step("\u2714 Սևագիրը արդեն ստեղծված էր (նախորդ փորձից)")
         return doc_id
+    # The buyer's name comes from ՊԵԿ's own register by TIN (the same name ՊԵԿ
+    # puts on the invoice once it is opened and saved), so the draft and its PDF
+    # show the real name at once, and a wrong TIN in the Excel is seen right away.
+    reg = pek_call(token, "tpinfo/tp-info-by-tin", {"tin": str(buyer_info["tin"])}) or {}
+    reg_name = str(reg.get("name") or "").strip() if isinstance(reg, dict) else ""
+    if not reg_name:
+        raise PekError("tin", f"ՀՎՀՀ {buyer_info['tin']}-ը ՊԵԿ ռեեստրում չգտնվեց. ստուգիր Excel-ը")
+    buyer_info = dict(buyer_info, name=reg_name)
+    log.step(f"\u2714 Գնորդը ՊԵԿ ռեեստրից՝ {reg_name}")
     entity, items = build_pek_draft(token, parsed, constants, buyer_info, goods, doc_id, number)
     log.step("\u2714 ՊԵԿ դասակարգիչ՝ բոլոր կոդերը գտնվեցին")
     tin = entity["supplierTin"]
