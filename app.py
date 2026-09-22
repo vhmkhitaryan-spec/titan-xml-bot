@@ -851,8 +851,35 @@ def pek_draft_pdf(token, doc_id):
             detail = f"{f.get('code', '')}: {f.get('message', '')}"
         except ValueError:
             pass
+        if any(k in detail.lower() for k in ("unauthorized", "jwt", "token", "auth")):
+            raise PekError("pdf", detail, auth=True)
     raise PekTransient(f"pdf-export → HTTP {r.status_code}, {r.headers.get('content-type', '?')}, "
                        f"{len(r.content)} բ {detail}".strip())
+
+
+def fetch_pdf(chat_id, doc_id, log):
+    """The draft's PDF with a valid token (a new one is requested like for any
+    other step) and up to 3 attempts, 30 s apart, when ՊԵԿ is slow."""
+    last = None
+    for attempt in range(1, 4):
+        token = usable_token()
+        if not token:
+            wait_for_token(chat_id, 0, log)
+            token = usable_token()
+        try:
+            return pek_draft_pdf(token, doc_id)
+        except PekError as e:
+            if not e.auth:
+                raise
+            last = e
+            log.step("\u26a0 PDF՝ ՊԵԿ-ը token-ը չընդունեց, նորն եմ խնդրում")
+            drop_token()
+        except PekTransient as e:
+            last = e
+            if attempt < 3:
+                log.step(f"\u26a0 PDF-ը դեռ չկա ({e}), կփորձեմ 30 վայրկյանից ({attempt}/3)")
+                time.sleep(30)
+    raise last
 
 
 def _day_bounds(date_str):
@@ -1318,7 +1345,7 @@ def handle_queue_row(row, msg, log, pending_after):
     except Exception:
         pass
     try:
-        pdf = pek_draft_pdf(usable_token() or STATE["token"], doc_id)
+        pdf = fetch_pdf(OUTPUT_CHAT_ID, doc_id, log)
         log.step("\u2714 PDF-ը ստացվեց ՊԵԿ-ից")
         name = f"sevagir-{prepared['parsed']['date']}-{row['number']}.pdf"
         if not log.finish_pdf(name, pdf):
@@ -1436,7 +1463,7 @@ def worker_loop():
 
             p = prepared["parsed"]
             try:
-                pdf = pek_draft_pdf(usable_token() or STATE["token"], doc_id)
+                pdf = fetch_pdf(chat_id, doc_id, log)
                 log.step("\u2714 PDF-ը ստացվեց ՊԵԿ-ից")
                 if not log.finish_pdf(f"sevagir-{p['date']}.pdf", pdf):
                     # Editing failed (very rare): fall back to a separate reply.
